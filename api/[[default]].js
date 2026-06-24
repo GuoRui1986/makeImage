@@ -1,493 +1,619 @@
 /**
  * AI生图工具 - IGA Pages Serverless Function
- * 基于 Express（IGA Pages 官方支持）
- * 依赖: express, cors, @supabase/supabase-js, jsonwebtoken, bcryptjs
+ * 精简依赖版本: 仅 express + jsonwebtoken
+ * 其余全部使用 Node.js 内置模块
  */
 import express from 'express'
-import cors from 'cors'
-import { createClient } from '@supabase/supabase-js'
 import jwt from 'jsonwebtoken'
-import bcrypt from 'bcryptjs'
+import crypto from 'node:crypto'
 
-// ====== 初始化 ======
-const app = express()
-app.use(cors())
-app.use(express.json({ limit: '10mb' }))
-
+// ====== 配置 ======
 const SUPABASE_URL = process.env.SUPABASE_URL || ''
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY || ''
 const DUOMI_API_KEY = process.env.DUOMI_API_KEY || ''
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-image-tool-secret-key-2024'
-const STORAGE_BUCKET = (process.env.SUPABASE_STORAGE_BUCKET || '').trim()
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || ''
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+const app = express()
+
+// ====== 中间件 ======
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-auth-token')
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  next()
+})
+
+app.use(express.json({ limit: '10mb' }))
 
 // ====== 工具函数 ======
-const ok = (data, message = 'ok') => ({ code: 200, data, message })
-const err = (message, code = 400) => ({ code, message })
-
-function getToken(req) {
-  const auth = req.headers.authorization || ''
-  return auth.replace('Bearer ', '')
+function success(data, message = 'success') {
+  return { code: 200, data, message }
+}
+function error(message, code = 500) {
+  return { code, message }
 }
 
-function verifyToken(req, res) {
-  const token = getToken(req)
-  if (!token) { res.status(401).json(err('未登录', 401)); return null }
-  try {
-    return jwt.verify(token, JWT_SECRET)
-  } catch {
-    res.status(401).json(err('登录已过期', 401))
-    return null
+function supabaseHeaders() {
+  return {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
   }
 }
 
-// ====== 多米 API（原生 fetch）=====
+async function supabaseGet(table, options = {}) {
+  const params = new URLSearchParams()
+  if (options.select) params.set('select', options.select)
+  if (options.filter) Object.entries(options.filter).forEach(([k, v]) => params.set(k, v))
+  if (options.order) params.set('order', options.order)
+  if (options.limit !== undefined) params.set('limit', String(options.limit))
+  if (options.offset !== undefined) params.set('offset', String(options.offset))
 
-function buildMultipart(parts) {
-  const boundary = '----FormBoundary' + Math.random().toString(36).substring(2)
-  let body = ''
-  for (const p of parts) {
-    body += `--${boundary}\r\n`
-    if (p.filename) {
-      body += `Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n`
-      body += `Content-Type: ${p.contentType || 'application/octet-stream'}\r\n\r\n`
-    } else {
-      body += `Content-Disposition: form-data; name="${p.name}"\r\n\r\n`
-    }
-    body += `${p.value}\r\n`
-  }
-  body += `--${boundary}--\r\n`
-  return { body, contentType: `multipart/form-data; boundary=${boundary}` }
-}
-
-async function generateImage2(params) {
-  const parts = [
-    { name: 'model_name', value: params.model || 'gpt-image-2' },
-    { name: 'prompt', value: params.prompt },
-    { name: 'n', value: String(params.n || 1) },
-    { name: 'size', value: params.size || '1024x1024' },
-  ]
-  if (params.ref_image) {
-    parts.push({ name: 'image', value: params.ref_image, filename: 'ref.png', contentType: 'image/png' })
-  }
-  const { body, contentType } = buildMultipart(parts)
-  const resp = await fetch('https://duomiapi.com/v1/images/generations?async=true', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${DUOMI_API_KEY}`, 'Content-Type': contentType },
-    body,
-  })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data.message || `image2 error ${resp.status}`)
-  if (!data.task_id) throw new Error('未返回 task_id')
-  return data.task_id
-}
-
-async function generateBanana(params) {
-  const path = params.ref_image ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
-  let body, contentType = 'application/json'
-  if (params.ref_image) {
-    const built = buildMultipart([
-      { name: 'prompt', value: params.prompt },
-      { name: 'image', value: params.ref_image, filename: 'ref.png', contentType: 'image/png' },
-    ])
-    body = built.body
-    contentType = built.contentType
-  } else {
-    body = JSON.stringify({ prompt: params.prompt, model_name: params.model || 'gemini-2.0-flash-exp', n: params.n || 1 })
-  }
-  const resp = await fetch(`https://duomiapi.com${path}`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${DUOMI_API_KEY}`, 'Content-Type': contentType },
-    body,
-  })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data.message || `banana error ${resp.status}`)
-  if (!data.task_id) throw new Error('未返回 task_id')
-  return data.task_id
-}
-
-async function queryTaskStatus(taskId) {
-  const resp = await fetch(`https://duomiapi.com/v1/tasks/${taskId}`, {
-    headers: { 'Authorization': `Bearer ${DUOMI_API_KEY}` },
-  })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data.message || `query error ${resp.status}`)
-  if (data.state === 'succeeded') {
-    return { status: 'success', imageUrl: data.data?.images?.[0]?.url || null }
-  }
-  if (data.state === 'failed') {
-    return { status: 'failed', error: data.error || '生成失败' }
-  }
-  return { status: 'pending' }
-}
-
-// ====== 积分操作 ======
-async function deductPoints(userId, amount, desc) {
-  const { data, error } = await supabase.rpc('deduct_points', {
-    p_user_id: userId, p_amount: amount, p_description: desc,
-  })
-  if (error) throw error
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${params}`
+  const res = await fetch(url, { headers: supabaseHeaders() })
+  if (!res.ok) throw new Error(`Supabase GET ${table} error: ${res.status}`)
+  // Handle single object vs array
+  const text = await res.text()
+  if (!text) return options.single ? null : []
+  const data = JSON.parse(text)
+  if (options.single && Array.isArray(data)) return data[0] || null
   return data
+}
+
+async function supabasePost(table, body) {
+  const url = `${SUPABASE_URL}/rest/v1/${table}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: supabaseHeaders(),
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(`Supabase POST ${table} error: ${res.status} ${errText}`)
+  }
+  return res.json()
+}
+
+async function supabaseUpdate(table, id, body, idCol = 'id') {
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${idCol}=eq.${id}`
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) throw new Error(`Supabase UPDATE ${table} error: ${res.status}`)
+}
+
+async function supabaseRpc(fnName, params = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/rpc/${fnName}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: supabaseHeaders(),
+    body: JSON.stringify(params)
+  })
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(`RPC ${fnName} error: ${res.status} ${errText}`)
+  }
+  return res.json()
+}
+
+// ====== JWT 鉴权中间件 ======
+function authMiddleware(req, res, next) {
+  const token = req.headers['x-auth-token']
+  if (!token) return res.status(401).json(error('未登录'))
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET)
+    req.user = decoded
+    next()
+  } catch {
+    res.status(401).json(error('登录已过期'))
+  }
+}
+
+function adminOnly(req, res, next) {
+  if (req.user?.role !== 'admin') return res.status(403).json(error('需要管理员权限'))
+  next()
+}
+
+// ====== 密码工具 ======
+const PASSWORD_SALT = 'ai_image_tool_salt_v1'
+
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password + PASSWORD_SALT).digest('hex')
 }
 
 // ====== 路由: 认证 ======
 
+// 登录
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body
-    if (!username || !password) return res.json(err('请输入用户名和密码'))
+    if (!username || !password) return res.status(400).json(error('请输入用户名和密码'))
 
-    // 查管理员表
-    const { data: admin } = await supabase.from('admin_users').select('*').eq('username', username).single()
-    if (admin && admin.is_active !== false) {
-      const valid = await bcrypt.compare(password, admin.password_hash)
-      if (valid) {
-        const { data: existingUser } = await supabase.from('users').select('id').eq('username', username).single()
-        let userId = existingUser?.id
-        if (!userId) {
-          const { data: newUser } = await supabase.from('users').insert({
-            username, nickname: admin.nickname || username, role: 'admin', points: 99999,
-          }).select('id').single()
-          userId = newUser?.id
-        }
-        const token = jwt.sign({ id: userId, username, role: 'admin' }, JWT_SECRET, { expiresIn: '7d' })
-        return res.json(ok({
-          token,
-          user: { id: userId, username, role: 'admin', nickname: admin.nickname || username },
-          points: 99999,
-        }, '登录成功'))
+    const users = await supabaseGet('admin_users', {
+      select: '*',
+      filter: { 'username': `eq.${username}` },
+      single: true
+    })
+
+    if (!users) return res.status(401).json(error('用户名或密码错误'))
+    const user = Array.isArray(users) ? users[0] : users
+
+    if (user.password_hash !== hashPassword(password)) {
+      return res.status(401).json(error('用户名或密码错误'))
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: 'admin' },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    )
+
+    // 同步到 users 表
+    try {
+      const existingUsers = await supabaseGet('users', {
+        select: 'id',
+        filter: { 'admin_user_id': `eq.${user.id}` },
+        limit: 1
+      })
+      if (Array.isArray(existingUsers) && existingUsers.length > 0) {
+        await supabaseUpdate('users', existingUsers[0].id, {
+          last_login: new Date().toISOString()
+        })
+      } else {
+        await supabasePost('users', {
+          admin_user_id: user.id,
+          username: user.username,
+          nickname: user.nickname || user.username,
+          points: 10000,
+          role: 'admin',
+          status: 'active',
+          last_login: new Date().toISOString()
+        })
       }
+    } catch (e) {
+      console.error('Sync user failed:', e.message)
     }
 
-    // 查普通用户
-    const { data: user } = await supabase.from('users').select('*').eq('username', username).single()
-    if (!user) return res.json(err('用户不存在'))
-    if (user.password_hash) {
-      const valid = await bcrypt.compare(password, user.password_hash)
-      if (!valid) return res.json(err('密码错误'))
-    }
-    const token = jwt.sign({ id: user.id, username, role: user.role || 'user' }, JWT_SECRET, { expiresIn: '7d' })
-    await supabase.from('users').update({ last_login: new Date().toISOString() }).eq('id', user.id)
-    return res.json(ok({
+    res.json(success({
       token,
-      user: { id: user.id, username, role: user.role || 'user', nickname: user.nickname || username },
-      points: user.points,
+      userInfo: { id: user.id, username: user.username, role: 'admin' }
     }, '登录成功'))
   } catch (e) {
     console.error('Login error:', e)
-    return res.status(500).json(err('服务器内部错误', 500))
+    res.status(500).json(error('登录失败: ' + e.message))
   }
 })
 
-app.get('/api/auth/info', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  const { data } = await supabase.from('users').select('*').eq('id', user.id).single()
-  if (!data) return res.json(err('用户不存在', 404))
-  return res.json(ok({
-    id: data.id, username: data.username, role: data.role || 'user',
-    nickname: data.nickname || data.username, points: data.points,
-  }))
+// 获取当前用户信息
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  res.json(success(req.user))
 })
 
 // ====== 路由: 任务 ======
 
-app.get('/api/tasks/pricing', async (_req, res) => {
+// 创建生图任务
+app.post('/api/tasks/create', authMiddleware, async (req, res) => {
   try {
-    const { data, count } = await supabase.from('pricing_config').select('*', { count: 'exact' }).order('model')
-    return res.json(ok({ list: data || [], total: count || 0 }))
-  } catch (e) {
-    return res.status(500).json(err('获取定价失败', 500))
-  }
-})
+    const { model, prompt, size, count = 1, refImageUrl, n } = req.body
+    const numImages = parseInt(n) || parseInt(count) || 1
+    if (!model || !prompt) return res.status(400).json(error('缺少必要参数'))
 
-app.post('/api/tasks/create', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  try {
-    const { model, prompt, n = 1, size, ref_image_url } = req.body
-    if (!prompt || !model) return res.json(err('缺少必要参数'))
-    if (!['image2', 'banana'].includes(model)) return res.json(err('不支持的模型'))
+    // 查定价
+    const pricingList = await supabaseGet('pricing_config', {
+      select: '*',
+      filter: { 'model': `eq.${model}`, 'status': `eq.active` },
+      single: true
+    })
+    const pricing = Array.isArray(pricingList) ? pricingList[0] : pricingList
+    if (!pricing) return res.status(400).json(error('该模型暂未开放'))
 
-    const { data: pricing } = await supabase.from('pricing_config').select('points_cost').eq('model', model).single()
-    const cost = (pricing?.points_cost || 5) * n
+    const totalCost = pricing.points * numImages
 
-    await deductPoints(user.id, cost, `生图任务(${model}×${n})`)
+    // 检查余额
+    const userId = req.user.id
+    const balanceData = await supabaseRpc('get_balance', { p_user_id: userId })
+    const currentBalance = typeof balanceData === 'number' ? balanceData : (balanceData?.points || 0)
 
-    const params = { prompt, model, n, size: size || '1024x1024', ref_image: ref_image_url || null }
-    const genFn = model === 'image2' ? generateImage2 : generateBanana
-    const taskId = await genFn(params)
-
-    const { data: task } = await supabase.from('image_tasks').insert({
-      user_id: user.id, model, prompt, n, size: size || '1024x1024',
-      status: 'pending', external_task_id: taskId, points_cost: cost,
-      ref_image_url: ref_image_url || null,
-    }).select().single()
-
-    return res.json(ok({ task_id: task?.id, external_task_id: taskId }, '任务创建成功'))
-  } catch (e) {
-    console.error('Create task error:', e)
-    const msg = String(e.message || e)
-    return res.status(500).json(err(msg.includes('余额不足') ? msg : '创建失败:' + msg, 500))
-  }
-})
-
-app.get('/api/tasks/:taskId/status', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  try {
-    const { data: task } = await supabase.from('image_tasks').select('*').eq('id', req.params.taskId).single()
-    if (!task) return res.json(err('任务不存在'))
-
-    if (task.status === 'succeeded' || task.status === 'failed') {
-      const images = task.result_images ? JSON.parse(task.result_images) : []
-      return res.json(ok({ status: task.status, images, error: task.error_msg }))
+    if (currentBalance < totalCost) {
+      return res.status(400).json(error(`积分不足，当前${currentBalance}，需要${totalCost}`))
     }
 
-    const result = await queryTaskStatus(task.external_task_id)
-    const updates = { status: result.status, updated_at: new Date().toISOString() }
-    if (result.status === 'success') updates.result_images = JSON.stringify([result.imageUrl])
-    if (result.status === 'failed') updates.error_msg = result.error || '生成失败'
-    await supabase.from('image_tasks').update(updates).eq('id', task.id)
+    // 扣积分
+    try {
+      await supabaseRpc('deduct_points', { p_user_id: userId, p_amount: totalCost, p_reason: `生成图片-${model}` })
+    } catch (deductErr) {
+      console.error('Deduct points failed:', deductErr.message)
+      return res.status(500).json(error('扣费失败，请重试'))
+    }
 
-    if (result.status === 'pending') return res.json(ok({ status: 'pending' }))
-    if (result.status === 'success') return res.json(ok({ status: 'succeeded', images: [result.imageUrl] }))
-    return res.json(ok({ status: 'failed', error: result.error }))
+    // 调多米API创建任务
+    const duomiBaseUrl = 'https://duomiapi.com'
+    const taskIds = []
+
+    for (let i = 0; i < numImages; i++) {
+      let apiPath, requestBody, contentType
+
+      if (model === 'image2') {
+        apiPath = '/v1/images/generations'
+        requestBody = JSON.stringify({
+          model: 'gpt-image-2',
+          prompt: prompt,
+          image_size: size || '1024x1024',
+          n: 1
+        })
+        contentType = 'application/json'
+      } else if (model === 'banana' || model === 'nano-banana') {
+        apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
+        const formData = new URLSearchParams()
+        formData.append('prompt', prompt)
+        if (refImageUrl) formData.append('image_url', refImageUrl)
+        if (size) formData.append('size', size)
+        requestBody = formData.toString()
+        contentType = 'application/x-www-form-urlencoded'
+      } else if (model === 'nano-banana-2') {
+        apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
+        const formData = new URLSearchParams()
+        formData.append('prompt', prompt)
+        if (refImageUrl) formData.append('image_url', refImageUrl)
+        if (size) formData.append('size', size)
+        requestBody = formData.toString()
+        contentType = 'application/x-www-form-urlencoded'
+      } else {
+        return res.status(400).json(error('不支持的模型'))
+      }
+
+      const resp = await fetch(`${duomiBaseUrl}${apiPath}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${DUOMI_API_KEY}`,
+          'Content-Type': contentType
+        },
+        body: requestBody
+      })
+
+      const result = await resp.json()
+      if (!resp.ok || !result.task_id) {
+        // 退还积分
+        try { await supabaseRpc('refund_points', { p_user_id: userId, p_amount: totalCost }) } catch {}
+        return res.status(502).json(error(result.message || `调用AI接口失败: ${resp.status}`))
+      }
+      taskIds.push(String(result.task_id))
+    }
+
+    // 写入数据库
+    const taskRecord = await supabasePost('image_tasks', {
+      user_id: userId,
+      model: model,
+      prompt: prompt,
+      size: size || '1024x1024',
+      count: numImages,
+      task_ids: JSON.stringify(taskIds),
+      status: 'processing',
+      points_cost: totalCost,
+      created_at: new Date().toISOString()
+    })
+
+    const taskId = Array.isArray(taskRecord) ? taskRecord[0]?.id : taskRecord?.id
+
+    res.json(success({ task_id: taskId, task_ids: taskIds }, '任务已提交'))
   } catch (e) {
-    console.error('Query status error:', e)
-    return res.status(500).json(err('查询状态失败', 500))
+    console.error('Create task error:', e)
+    res.status(500).json(error('创建任务失败: ' + e.message))
   }
 })
 
-app.post('/api/tasks/upload-ref', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
+// 查询任务状态
+app.get('/api/tasks/status/:taskId', authMiddleware, async (req, res) => {
   try {
-    const { base64Data, mimeType = 'image/png' } = req.body
-    if (!base64Data) return res.json(err('没有图片数据'))
-    const base64 = base64Data.replace(/^data:image\/\w+;base64,/, '')
-    const buffer = Buffer.from(base64, 'base64')
-    const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png'
-    const path = `refs/${user.id}/${Date.now()}.${ext}`
-    const { error: uploadError } = await supabase.storage.from(STORAGE_BUCKET).upload(path, buffer, {
-      contentType: mimeType, upsert: true,
+    const taskId = req.params.taskId
+    const tasks = await supabaseGet('image_tasks', {
+      select: '*',
+      filter: { 'id': `eq.${taskId}` },
+      single: true
     })
-    if (uploadError) throw uploadError
-    const { data: urlData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path)
-    return res.json(ok({ url: urlData.publicUrl, path }, '上传成功'))
+    const task = Array.isArray(tasks) ? tasks[0] : tasks
+    if (!task) return res.status(404).json(error('任务不存在'))
+
+    const taskIds = JSON.parse(task.task_ids || '[]')
+    const results = []
+
+    for (const tid of taskIds) {
+      try {
+        const resp = await fetch(`https://duomiapi.com/v1/tasks/${tid}`, {
+          headers: { 'Authorization': `Bearer ${DUOMI_API_KEY}` }
+        })
+        const data = await resp.json()
+        const state = data.state
+
+        if (state === 'succeeded') {
+          results.push({ task_id: tid, status: 'success', image_url: data.data?.images?.[0]?.url || null })
+        } else if (state === 'failed') {
+          results.push({ task_id: tid, status: 'failed', error: data.error || '生成失败' })
+        } else {
+          results.push({ task_id: tid, status: 'pending' })
+        }
+      } catch {
+        results.push({ task_id: tid, status: 'failed', error: '查询状态失败' })
+      }
+    }
+
+    const allDone = results.every(r => r.status !== 'pending')
+    const allSuccess = results.every(r => r.status === 'success')
+
+    if (allDone && allSuccess) {
+      const images = results.map(r => r.image_url).filter(Boolean)
+      await supabaseUpdate('image_tasks', taskId, {
+        status: 'completed',
+        result_images: JSON.stringify(images),
+        completed_at: new Date().toISOString()
+      })
+    } else if (allDone && !allSuccess) {
+      await supabaseUpdate('image_tasks', taskId, { status: 'failed' })
+      // 退积分
+      try { await supabaseRpc('refund_points', { p_user_id: task.user_id, p_amount: task.points_cost }) } catch {}
+    }
+
+    res.json(success(results))
   } catch (e) {
-    console.error('Upload error:', e)
-    return res.status(500).json(err('上传失败: ' + e.message, 500))
+    res.status(500).json(error('查询状态失败'))
+  }
+})
+
+// 上传参考图到 Supabase Storage
+app.post('/api/tasks/upload-ref', authMiddleware, async (req, res) => {
+  try {
+    const base64 = req.body.image
+    if (!base64) return res.status(400).json(error('没有收到图片数据'))
+
+    const base64Data = base64.replace(/^data:image\/\w+;base64,/, '')
+    const buffer = Buffer.from(base64Data, 'base64')
+    const ext = base64.includes('image/png') ? 'png' : 'jpg'
+    const fileName = `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+
+    const uploadRes = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${fileName}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/octet-stream'
+        },
+        body: buffer
+      }
+    )
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text().catch(() => '')
+      return res.status(502).json(error('上传失败: ' + errText))
+    }
+
+    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${fileName}`
+    res.json(success({ url: publicUrl }), '上传成功')
+  } catch (e) {
+    res.status(500).json(error('上传失败: ' + e.message))
+  }
+})
+
+// 获取定价
+app.get('/api/tasks/pricing', async (req, res) => {
+  try {
+    const list = await supabaseGet('pricing_config', {
+      select: '*',
+      filter: { 'status': `eq.active` },
+      order: 'points.asc'
+    })
+    res.json(success(Array.isArray(list) ? list : []))
+  } catch (e) {
+    res.status(500).json(error('获取定价失败'))
   }
 })
 
 // ====== 路由: 积分 ======
 
-app.get('/api/points/balance', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  const { data } = await supabase.from('users').select('points').eq('id', user.id).single()
-  return res.json(ok({ balance: data?.points || 0 }))
-})
-
-app.get('/api/points/records', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  const page = parseInt(req.query.page) || 1
-  const size = parseInt(req.query.size) || 10
-  const from = (page - 1) * size
-  const to = from + size - 1
-  const { data, count } = await supabase.from('points_records')
-    .select('*', { count: 'exact' })
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
-    .range(from, to)
-  return res.json(ok({ list: data || [], total: count || 0, page, size }))
-})
-
-// ====== 路由: 历史 ======
-
-app.get('/api/history', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  const page = parseInt(req.query.page) || 1
-  const size = parseInt(req.query.size) || 10
-  const from = (page - 1) * size
-  const to = from + size - 1
-  let q = supabase.from('image_tasks').select('*', { count: 'exact' }).eq('user_id', user.id)
-  if (req.query.model) q = q.eq('model', req.query.model)
-  const { data, count } = await q.order('created_at', { ascending: false }).range(from, to)
-  const list = (data || []).map(t => ({ ...t, images: t.result_images ? JSON.parse(t.result_images) : [] }))
-  return res.json(ok({ list, total: count || 0, page, size }))
-})
-
-app.get('/api/history/:id', async (req, res) => {
-  const user = verifyToken(req, res)
-  if (!user) return
-  const { data: task } = await supabase.from('image_tasks')
-    .select('*').eq('id', req.params.id).eq('user_id', user.id).single()
-  if (!task) return res.json(err('任务不存在'))
-  return res.json(ok({ ...task, images: task.result_images ? JSON.parse(task.result_images) : [] }))
-})
-
-// ====== 路由: 管理后台 ======
-
-app.get('/api/admin/users', async (_req, res) => {
-  const { data, count } = await supabase.from('users').select('*', { count: 'exact' }).order('created_at', { ascending: false })
-  return res.json(ok({ list: data || [], total: count || 0 }))
-})
-
-app.post('/api/admin/users', async (req, res) => {
+// 余额
+app.get('/api/points/balance', authMiddleware, async (req, res) => {
   try {
-    const { username, password, nickname, points = 100 } = req.body
-    if (!username || !password) return res.json(err('用户名和密码必填'))
-    const hash = await bcrypt.hash(password, 10)
-    const { data, error: insertError } = await supabase.from('users').insert({
-      username, password_hash: hash, nickname: nickname || username, points, role: 'user',
-    }).select().single()
-    if (insertError) return res.json(err(insertError.message || '创建失败'))
-    return res.json(ok(data, '创建成功'))
+    const data = await supabaseRpc('get_balance', { p_user_id: req.user.id })
+    res.json(success({ balance: typeof data === 'number' ? data : (data?.points || 0) }))
   } catch (e) {
-    return res.status(500).json(err('创建失败: ' + e.message, 500))
+    res.status(500).json(error('查询积分失败'))
   }
 })
 
-app.put('/api/admin/users/:id/points', async (req, res) => {
+// 记录
+app.get('/api/points/records', authMiddleware, async (req, res) => {
   try {
-    const { amount, remark } = req.body
-    const numAmount = Number(amount)
-    if (!amount || isNaN(numAmount)) return res.json(err('请填写有效的调整数量'))
-    const desc = remark || `管理员调整${numAmount > 0 ? '+' : ''}${numAmount}积分`
-    const { data, error: rpcError } = await supabase.rpc('admin_adjust_points', {
-      p_user_id: req.params.id, p_amount: numAmount, p_reason: desc,
+    const page = Math.max(1, parseInt(req.query.page) || 1)
+    const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
+    const offset = (page - 1) * size
+
+    const q = { 'user_id': `eq.${req.user.id}` }
+    const [list, countResult] = await Promise.all([
+      supabaseGet('points_records', { select: '*', filter: q, order: 'created_at.desc', limit: size, offset }),
+      supabaseGet('points_records', { select: 'id', filter: q, header: 'Content-Range' })
+    ])
+
+    const count = Array.isArray(countResult) ? countResult.length : 0
+    res.json(success({ list: Array.isArray(list) ? list : [], total: count, page, size }))
+  } catch (e) {
+    res.status(500).json(error('查询积分记录失败'))
+  }
+})
+
+// ====== 路由: 历史记录 ======
+
+app.get('/api/history/list', authMiddleware, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1)
+    const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
+    const offset = (page - 1) * size
+    const status = req.query.status
+
+    const filter = { 'user_id': `eq.${req.user.id}` }
+    if (status) filter['status'] = `eq.${status}`
+
+    const list = await supabaseGet('image_tasks', {
+      select: '*',
+      filter: filter,
+      order: 'created_at.desc',
+      limit: size,
+      offset
     })
-    if (rpcError) return res.json(err(rpcError.message, 500))
-    return res.json(ok({ new_balance: data }, '调整成功'))
+
+    res.json(success({ list: Array.isArray(list) ? list : [], total: 0, page, size }))
   } catch (e) {
-    return res.status(500).json(err('操作失败: ' + e.message, 500))
+    res.status(500).json(error('查询历史记录失败'))
   }
 })
 
-app.put('/api/admin/users/:id/password', async (req, res) => {
+// 任务详情
+app.get('/api/history/detail/:id', authMiddleware, async (req, res) => {
   try {
-    const { newPassword } = req.body
-    if (!newPassword) return res.json(err('请输入新密码'))
-    const hash = await bcrypt.hash(newPassword, 10)
-    const { error: updateError } = await supabase.from('users').update({ password_hash: hash }).eq('id', req.params.id)
-    if (updateError) return res.json(err(updateError.message, 500))
-    return res.json(ok(null, '密码已重置'))
+    const tasks = await supabaseGet('image_tasks', {
+      select: '*',
+      filter: { 'id': `eq.${req.params.id}` },
+      single: true
+    })
+    const task = Array.isArray(tasks) ? tasks[0] : tasks
+    if (!task) return res.status(404).json(error('任务不存在'))
+    res.json(success({
+      ...task,
+      images: task.result_images ? JSON.parse(task.result_images) : [],
+      task_ids: JSON.parse(task.task_ids || '[]')
+    }))
   } catch (e) {
-    return res.status(500).json(err('重置失败: ' + e.message, 500))
+    res.status(500).json(error('查询详情失败'))
   }
 })
 
-app.put('/api/admin/users/:id/status', async (req, res) => {
+// ====== 路由: 管理 ======
+
+// 用户列表
+app.get('/api/admin/users', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { status } = req.body
-    const { error: updateError } = await supabase.from('users').update({ is_active: status === 'active' }).eq('id', req.params.id)
-    if (updateError) return res.json(err(updateError.message, 500))
-    return res.json(ok(null, '状态已更新'))
+    const page = Math.max(1, parseInt(req.query.page) || 1)
+    const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
+    const offset = (page - 1) * size
+
+    const list = await supabaseGet('users', {
+      select: '*,admin_user_id(username,nickname)',
+      order: 'created_at.desc',
+      limit: size,
+      offset
+    })
+
+    res.json(success({ list: Array.isArray(list) ? list : [], total: 0, page, size }))
   } catch (e) {
-    return res.status(500).json(err('操作失败: ' + e.message, 500))
+    res.status(500).json(error('获取用户列表失败'))
   }
 })
 
-app.get('/api/admin/pricing', async (_req, res) => {
-  const { data, count } = await supabase.from('pricing_config').select('*', { count: 'exact' }).order('model')
-  return res.json(ok({ list: data || [], total: count || 0 }))
+// 更新用户积分
+app.put('/api/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { amount, reason } = req.body
+    const targetId = req.params.id
+    const adjustAmount = Number(amount)
+    if (!adjustAmount) return res.status(400).json(error('请输入调整金额'))
+
+    await supabaseRpc('admin_adjust_points', {
+      p_user_id: targetId,
+      p_amount: adjustAmount,
+      p_reason: reason || '管理员手动调整'
+    })
+
+    // 查新余额
+    const data = await supabaseRpc('get_balance', { p_user_id: targetId })
+    res.json(success({ new_balance: typeof data === 'number' ? data : (data?.points || 0) }, '调整成功'))
+  } catch (e) {
+    res.status(500).json(error('调整积分失败'))
+  }
 })
 
-app.put('/api/admin/pricing', async (req, res) => {
+// 定价管理
+app.get('/api/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { pricing } = req.body
-    if (!Array.isArray(pricing)) return res.json(err('数据格式错误'))
-    for (const item of pricing) {
-      const { error: updateError } = await supabase.from('pricing_config')
-        .update({ points_cost: item.points_cost }).eq('id', item.id)
-      if (updateError) console.error('Update pricing error:', updateError)
+    const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
+    res.json(success(Array.isArray(list) ? list : []))
+  } catch (e) {
+    res.status(500).json(error('获取定价配置失败'))
+  }
+})
+
+app.put('/api/admin/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { points, description, status } = req.body
+    await supabaseUpdate('pricing_config', req.params.id, { points, description, status })
+    res.json(success(null, '更新成功'))
+  } catch (e) {
+    res.status(500).json(error('更新定价失败'))
+  }
+})
+
+// 积分流水
+app.get('/api/admin/records', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1)
+    const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
+    const offset = (page - 1) * size
+    const userId = req.query.user_id
+
+    const filter = {}
+    if (userId) filter['user_id'] = `eq.${userId}`
+
+    const list = await supabaseGet('points_records', {
+      select: '*,user_id(username)',
+      filter,
+      order: 'created_at.desc',
+      limit: size,
+      offset
+    })
+
+    res.json(success({ list: Array.isArray(list) ? list : [], total: 0, page, size }))
+  } catch (e) {
+    res.status(500).json(error('获取积分流水失败'))
+  }
+})
+
+// 系统设置
+app.get('/api/admin/settings', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const list = await supabaseGet('system_config', { select: '*' })
+    res.json(success({ settings: Array.isArray(list) ? list : [] }))
+  } catch (e) {
+    res.status(500).json(error('获取设置失败'))
+  }
+})
+
+app.put('/api/admin/settings/:key', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { value } = req.body
+    // 先查是否存在
+    const existing = await supabaseGet('system_config', {
+      select: 'id,key,value',
+      filter: { 'key': `eq.${req.params.key}` },
+      single: true
+    })
+    const item = Array.isArray(existing) ? existing[0] : existing
+    if (item) {
+      await supabaseUpdate('system_config', item.id, { value: value ?? '' })
+    } else {
+      await supabasePost('system_config', { key: req.params.key, value: value ?? '' })
     }
-    return res.json(ok(null, '更新成功'))
+    res.json(success(null, '更新成功'))
   } catch (e) {
-    return res.status(500).json(err('更新失败: ' + e.message, 500))
+    res.status(500).json(error('更新设置失败'))
   }
 })
 
-app.get('/api/admin/records/points', async (req, res) => {
-  const page = parseInt(req.query.page) || 1
-  const size = parseInt(req.query.size) || 20
-  const from = (page - 1) * size
-  const to = from + size - 1
-  const { data, count } = await supabase.from('points_records')
-    .select('*, users!inner(username)', { count: 'exact' })
-    .order('created_at', { ascending: false })
-    .range(from, to)
-  return res.json(ok({ list: data || [], total: count || 0, page, size }))
-})
-
-app.get('/api/admin/records/images', async (req, res) => {
-  const page = parseInt(req.query.page) || 1
-  const size = parseInt(req.query.size) || 20
-  const from = (page - 1) * size
-  const to = from + size - 1
-  let q = supabase.from('image_tasks')
-    .select('*, users!inner(username)', { count: 'exact' })
-    .order('created_at', { ascending: false })
-  if (req.query.status) q = q.eq('status', req.query.status)
-  const { data, count } = await q.range(from, to)
-  return res.json(ok({ list: data || [], total: count || 0, page, size }))
-})
-
-app.get('/api/admin/records/images/:id', async (req, res) => {
-  const { data } = await supabase.from('image_tasks').select('*').eq('id', req.params.id).single()
-  if (!data) return res.json(err('记录不存在'))
-  return res.json(ok({ ...data, images: data.result_images ? JSON.parse(data.result_images) : [] }))
-})
-
-app.get('/api/admin/settings', async (_req, res) => {
-  const { data } = await supabase.from('system_config').select('*')
-  const settings = {}
-  for (const item of (data || [])) {
-    settings[item.config_key] = item.config_value
-  }
-  return res.json(ok({ settings }))
-})
-
-app.put('/api/admin/settings/api', async (req, res) => {
-  try {
-    const { duomi_api_key, duomi_base_url } = req.body
-    if (duomi_api_key) {
-      await supabase.from('system_config').update({ config_value: duomi_api_key, updated_at: new Date().toISOString() }).eq('config_key', 'duomi_api_key')
-    }
-    if (duomi_base_url) {
-      await supabase.from('system_config').update({ config_value: duomi_base_url, updated_at: new Date().toISOString() }).eq('config_key', 'duomi_base_url')
-    }
-    return res.json(ok(null, '更新成功'))
-  } catch (e) {
-    return res.status(500).json(err('更新失败: ' + e.message, 500))
-  }
-})
-
-app.put('/api/admin/settings/password', async (req, res) => {
-  try {
-    const { oldPassword, newPassword } = req.body
-    if (!oldPassword || !newPassword) return res.json(err('请填写旧密码和新密码'))
-    const { data: admin } = await supabase.from('admin_users').select('password_hash').eq('username', 'admin').single()
-    if (!admin) return res.json(err('管理员不存在'))
-    const valid = await bcrypt.compare(oldPassword, admin.password_hash)
-    if (!valid) return res.json(err('旧密码错误'))
-    const hash = await bcrypt.hash(newPassword, 10)
-    const { error: updateError } = await supabase.from('admin_users').update({ password_hash: hash }).eq('username', 'admin')
-    if (updateError) return res.json(err(updateError.message, 500))
-    return res.json(ok(null, '密码已修改'))
-  } catch (e) {
-    return res.status(500).json(err('修改失败: ' + e.message, 500))
-  }
-})
-
-// ====== 默认路由 ======
-app.all('*', (req, res) => {
-  res.status(404).json({ code: 404, message: `接口不存在: ${req.method} ${req.path}` })
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json(success({ status: 'ok', time: new Date().toISOString() }))
 })
 
 export default app
