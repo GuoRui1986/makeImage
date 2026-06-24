@@ -129,7 +129,7 @@ function hashPassword(password) {
 // ====== 路由: 认证 ======
 
 // 登录
-app.post('/api/auth/login', async (req, res) => {
+app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body
     if (!username || !password) return res.status(400).json(error('请输入用户名和密码'))
@@ -190,14 +190,14 @@ app.post('/api/auth/login', async (req, res) => {
 })
 
 // 获取当前用户信息
-app.get('/api/auth/me', authMiddleware, (req, res) => {
+app.get('/auth/me', authMiddleware, (req, res) => {
   res.json(success(req.user))
 })
 
 // ====== 路由: 任务 ======
 
 // 创建生图任务
-app.post('/api/tasks/create', authMiddleware, async (req, res) => {
+app.post('/tasks/create', authMiddleware, async (req, res) => {
   try {
     const { model, prompt, size, count = 1, refImageUrl, n } = req.body
     const numImages = parseInt(n) || parseInt(count) || 1
@@ -308,7 +308,7 @@ app.post('/api/tasks/create', authMiddleware, async (req, res) => {
 })
 
 // 查询任务状态
-app.get('/api/tasks/status/:taskId', authMiddleware, async (req, res) => {
+app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
   try {
     const taskId = req.params.taskId
     const tasks = await supabaseGet('image_tasks', {
@@ -365,7 +365,7 @@ app.get('/api/tasks/status/:taskId', authMiddleware, async (req, res) => {
 })
 
 // 上传参考图到 Supabase Storage
-app.post('/api/tasks/upload-ref', authMiddleware, async (req, res) => {
+app.post('/tasks/upload-ref', authMiddleware, async (req, res) => {
   try {
     const base64 = req.body.image
     if (!base64) return res.status(400).json(error('没有收到图片数据'))
@@ -400,7 +400,7 @@ app.post('/api/tasks/upload-ref', authMiddleware, async (req, res) => {
 })
 
 // 获取定价
-app.get('/api/tasks/pricing', async (req, res) => {
+app.get('/tasks/pricing', async (req, res) => {
   try {
     const list = await supabaseGet('pricing_config', {
       select: '*',
@@ -416,7 +416,7 @@ app.get('/api/tasks/pricing', async (req, res) => {
 // ====== 路由: 积分 ======
 
 // 余额
-app.get('/api/points/balance', authMiddleware, async (req, res) => {
+app.get('/points/balance', authMiddleware, async (req, res) => {
   try {
     const data = await supabaseRpc('get_balance', { p_user_id: req.user.id })
     res.json(success({ balance: typeof data === 'number' ? data : (data?.points || 0) }))
@@ -426,7 +426,7 @@ app.get('/api/points/balance', authMiddleware, async (req, res) => {
 })
 
 // 记录
-app.get('/api/points/records', authMiddleware, async (req, res) => {
+app.get('/points/records', authMiddleware, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1)
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
@@ -447,7 +447,7 @@ app.get('/api/points/records', authMiddleware, async (req, res) => {
 
 // ====== 路由: 历史记录 ======
 
-app.get('/api/history/list', authMiddleware, async (req, res) => {
+app.get('/history/list', authMiddleware, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1)
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
@@ -472,7 +472,7 @@ app.get('/api/history/list', authMiddleware, async (req, res) => {
 })
 
 // 任务详情
-app.get('/api/history/detail/:id', authMiddleware, async (req, res) => {
+app.get('/history/detail/:id', authMiddleware, async (req, res) => {
   try {
     const tasks = await supabaseGet('image_tasks', {
       select: '*',
@@ -494,7 +494,7 @@ app.get('/api/history/detail/:id', authMiddleware, async (req, res) => {
 // ====== 路由: 管理 ======
 
 // 用户列表
-app.get('/api/admin/users', authMiddleware, adminOnly, async (req, res) => {
+app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1)
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
@@ -514,7 +514,7 @@ app.get('/api/admin/users', authMiddleware, adminOnly, async (req, res) => {
 })
 
 // 更新用户积分
-app.put('/api/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) => {
+app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { amount, reason } = req.body
     const targetId = req.params.id
@@ -536,7 +536,7 @@ app.put('/api/admin/users/:id/points', authMiddleware, adminOnly, async (req, re
 })
 
 // 定价管理
-app.get('/api/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
+app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   try {
     const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
     res.json(success(Array.isArray(list) ? list : []))
@@ -545,7 +545,7 @@ app.get('/api/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-app.put('/api/admin/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
+app.put('/admin/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { points, description, status } = req.body
     await supabaseUpdate('pricing_config', req.params.id, { points, description, status })
@@ -556,7 +556,7 @@ app.put('/api/admin/pricing/:id', authMiddleware, adminOnly, async (req, res) =>
 })
 
 // 积分流水
-app.get('/api/admin/records', authMiddleware, adminOnly, async (req, res) => {
+app.get('/admin/records', authMiddleware, adminOnly, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1)
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
@@ -581,7 +581,7 @@ app.get('/api/admin/records', authMiddleware, adminOnly, async (req, res) => {
 })
 
 // 系统设置
-app.get('/api/admin/settings', authMiddleware, adminOnly, async (req, res) => {
+app.get('/admin/settings', authMiddleware, adminOnly, async (req, res) => {
   try {
     const list = await supabaseGet('system_config', { select: '*' })
     res.json(success({ settings: Array.isArray(list) ? list : [] }))
@@ -590,7 +590,7 @@ app.get('/api/admin/settings', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-app.put('/api/admin/settings/:key', authMiddleware, adminOnly, async (req, res) => {
+app.put('/admin/settings/:key', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { value } = req.body
     // 先查是否存在
@@ -612,7 +612,7 @@ app.put('/api/admin/settings/:key', authMiddleware, adminOnly, async (req, res) 
 })
 
 // Health check
-app.get('/api/health', (req, res) => {
+app.get('/health', (req, res) => {
   res.json(success({ status: 'ok', time: new Date().toISOString() }))
 })
 
