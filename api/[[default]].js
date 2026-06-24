@@ -7,9 +7,9 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 
-// ====== 配置 ======
-const SUPABASE_URL = process.env.SUPABASE_URL || ''
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY || ''
+// ====== 配置（适配 IGA Pages 环境变量） ======
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
 const DUOMI_API_KEY = process.env.DUOMI_API_KEY || ''
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-image-tool-secret-key-2024'
 const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || ''
