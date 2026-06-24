@@ -18,14 +18,16 @@ export const useAuthStore = defineStore('auth', {
       const res = await authApi.login(username, password)
       this.token = res.data.token
       localStorage.setItem('token', this.token)
+      const info = res.data.userInfo || res.data
       this.user = {
-        username: res.data.username,
-        role: res.data.role
+        id: info.id,
+        username: info.username,
+        role: info.role
       }
       if (res.data.pointsBalance !== undefined) {
         this.pointsBalance = res.data.pointsBalance
       }
-      return res.data
+      return { ...info, pointsBalance: res.data.pointsBalance }
     },
 
     initFromStorage() {
