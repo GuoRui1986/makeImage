@@ -103,7 +103,13 @@ async function supabaseRpc(fnName, params = {}) {
 
 // ====== JWT 鉴权中间件 ======
 function authMiddleware(req, res, next) {
-  const token = req.headers['x-auth-token']
+  // 兼容两种 header: Authorization (Bearer token) 和 x-auth-token
+  let token = req.headers['x-auth-token']
+  if (!token && req.headers.authorization) {
+    // 从 Authorization: Bearer xxx 中提取 token
+    const auth = req.headers.authorization
+    token = auth.startsWith('Bearer ') ? auth.slice(7) : auth
+  }
   if (!token) return res.status(401).json(error('未登录'))
   try {
     const decoded = jwt.verify(token, JWT_SECRET)
