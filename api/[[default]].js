@@ -519,6 +519,59 @@ app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
+// 创建用户
+app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { username, password, points = 100 } = req.body
+    if (!username || !password) {
+      return res.status(400).json(error('用户名和密码不能为空'))
+    }
+
+    // 检查是否已存在
+    const existing = await supabaseGet('users', {
+      select: 'id',
+      filter: { 'username': `eq.${username}` },
+      limit: 1
+    })
+    if (Array.isArray(existing) && existing.length > 0) {
+      return res.status(400).json(error('用户名已存在'))
+    }
+
+    // 同时在 admin_users 和 users 表创建
+    const hashedPassword = hashPassword(password)
+    const now = new Date().toISOString()
+
+    const adminUser = await supabasePost('admin_users', {
+      username,
+      nickname: username,
+      password_hash: hashedPassword,
+      role: 'user',
+      status: 'active',
+      created_at: now,
+      updated_at: now
+    })
+
+    const adminUserId = Array.isArray(adminUser) ? adminUser[0]?.id : adminUser?.id
+
+    const user = await supabasePost('users', {
+      admin_user_id: adminUserId,
+      username,
+      nickname: username,
+      points: Number(points),
+      role: 'user',
+      status: 'active',
+      created_at: now,
+      last_login: null
+    })
+
+    const userId = Array.isArray(user) ? user[0]?.id : user?.id
+    res.json(success({ id: userId, username, points }, '创建成功'))
+  } catch (e) {
+    console.error('Create user error:', e)
+    res.status(500).json(error('创建用户失败: ' + e.message))
+  }
+})
+
 // 更新用户积分
 app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) => {
   try {
