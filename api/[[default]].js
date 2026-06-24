@@ -378,7 +378,7 @@ app.get('/api/history/:taskId', async (req, res) => {
   try {
     const { data: task } = await supabase.from('image_tasks').select('*').eq('id', req.params.taskId).eq('user_id', user.id).single()
     if (!task) { res.json(error('任务不存在')); return }
-    res.json(success({ ...task, images: task.result_images ? JSON.parse(task.result_images) : [] })
+    res.json(success({ ...task, images: task.result_images ? JSON.parse(task.result_images) : [] }))
   } catch (e) {
     res.status(500).json(error('获取详情失败'))
   }
@@ -389,7 +389,7 @@ app.get('/api/history/:taskId', async (req, res) => {
 app.get('/admin/api/users', async (_req, res) => {
   try {
     const { data, count } = await supabase.from('users').select('*', { count: 'exact' }).order('created_at', { ascending: false })
-    res.json(success({ list: data || [], total: count || 0 })
+    res.json(success({ list: data || [], total: count || 0 }))
   } catch (e) { res.status(500).json(error('获取用户列表失败')) }
 })
 
@@ -405,14 +405,14 @@ app.put('/admin/api/users/:id/points', async (req, res) => {
       p_user_id: id, p_amount: numAmount, p_reason: desc,
     })
     if (error) throw error
-    res.json(success({ new_balance: data }, '调整成功')
+    res.json(success({ new_balance: data }, '调整成功'))
   } catch (e) { res.status(500).json(error('操作失败')) }
 })
 
 app.get('/admin/api/pricing', async (_req, res) => {
   try {
     const { data, count } = await supabase.from('pricing_config').select('*', { count: 'exact' }).order('model')
-    res.json(success({ list: data || [], total: count || 0 })
+    res.json(success({ list: data || [], total: count || 0 }))
   } catch (e) { res.status(500).json(error('获取定价失败')) }
 })
 
@@ -421,7 +421,7 @@ app.put('/admin/api/pricing/:id', async (req, res) => {
     const { model, points_cost } = req.body
     const { error } = await supabase.from('pricing_config').update({ model, points_cost }).eq('id', req.params.id)
     if (error) throw error
-    res.json(success(null, '更新成功')
+    res.json(success(null, '更新成功'))
   } catch (e) { res.status(500).json(error('更新定价失败')) }
 })
 
@@ -435,7 +435,7 @@ app.get('/admin/api/records', async (req, res) => {
     if (type) q = q.eq('type', type)
     if (userId) q = q.eq('user_id', userId)
     const { data, count } = await q.range((page - 1) * size, page * size - 1)
-    res.json(success({ list: data || [], total: count || 0, page, size })
+    res.json(success({ list: data || [], total: count || 0, page, size }))
   } catch (e) { res.status(500).json(error('获取记录失败')) }
 })
 
@@ -447,14 +447,14 @@ app.get('/admin/api/tasks', async (req, res) => {
     let q = supabase.from('image_tasks').select('*, users!inner(username)', { count: 'exact' }).order('created_at', { ascending: false })
     if (status) q = q.eq('status', status)
     const { data, count } = await q.range((page - 1) * size, page * size - 1)
-    res.json(success({ list: data || [], total: count || 0, page, size })
+    res.json(success({ list: data || [], total: count || 0, page, size }))
   } catch (e) { res.status(500).json(error('获取任务列表失败')) }
 })
 
 app.get('/admin/api/settings', async (_req, res) => {
   try {
     const { data } = await supabase.from('system_config').select('*')
-    res.json(success({ settings: data || [] })
+    res.json(success({ settings: data || [] }))
   } catch (e) { res.status(500).json(error('获取设置失败')) }
 })
 
@@ -463,7 +463,7 @@ app.put('/admin/api/settings/:key', async (req, res) => {
     const { value } = req.body
     const { error } = await supabase.from('system_config').update({ value, updated_at: new Date().toISOString() }).eq('config_key', req.params.key)
     if (error) throw error
-    res.json(success(null, '更新成功')
+    res.json(success(null, '更新成功'))
   } catch (e) { res.status(500).json(error('更新设置失败')) }
 })
 
