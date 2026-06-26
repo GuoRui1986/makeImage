@@ -220,18 +220,33 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
 
     const totalCost = pricing.points * numImages
 
-    // 检查余额
+    // 检查余额（直接查 users 表，不用 RPC）
     const userId = req.user.id
-    const balanceData = await supabaseRpc('get_balance', { p_user_id: userId })
-    const currentBalance = typeof balanceData === 'number' ? balanceData : (balanceData?.points || 0)
+    const userRec = await supabaseGet('users', {
+      select: 'points,points_balance',
+      filter: { 'id': `eq.${userId}` },
+      single: true
+    })
+    const userObj = Array.isArray(userRec) ? userRec[0] : userRec
+    const currentBalance = Number(userObj?.points ?? userObj?.points_balance ?? 0)
 
     if (currentBalance < totalCost) {
       return res.status(400).json(error(`积分不足，当前${currentBalance}，需要${totalCost}`))
     }
 
-    // 扣积分
+    // 扣积分（直接 UPDATE，不用 RPC）
+    const newBalance = currentBalance - totalCost
     try {
-      await supabaseRpc('deduct_points', { p_user_id: userId, p_amount: totalCost, p_reason: `生成图片-${model}` })
+      await supabaseUpdate('users', userId, { points: newBalance })
+      try {
+        await supabasePost('points_records', {
+          user_id: userId,
+          amount: -totalCost,
+          balance_after: newBalance,
+          type: 'generate_deduct',
+          remark: `生成图片-${model}`
+        })
+      } catch {}
     } catch (deductErr) {
       console.error('Deduct points failed:', deductErr.message)
       return res.status(500).json(error('扣费失败，请重试'))
@@ -360,8 +375,26 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
       })
     } else if (allDone && !allSuccess) {
       await supabaseUpdate('image_tasks', taskId, { status: 'failed' })
-      // 退积分
-      try { await supabaseRpc('refund_points', { p_user_id: task.user_id, p_amount: task.points_cost }) } catch {}
+      // 退积分（直接 UPDATE，不用 RPC）
+      try {
+        const uRec = await supabaseGet('users', {
+          select: 'points,points_balance',
+          filter: { 'id': `eq.${task.user_id}` },
+          single: true
+        })
+        const u = Array.isArray(uRec) ? uRec[0] : uRec
+        const bal = Number(u?.points ?? u?.points_balance ?? 0) + Number(task.points_cost || 0)
+        await supabaseUpdate('users', task.user_id, { points: bal })
+        try {
+          await supabasePost('points_records', {
+            user_id: task.user_id,
+            amount: Number(task.points_cost || 0),
+            balance_after: bal,
+            type: 'fail_refund',
+            remark: '生成失败返还积分'
+          })
+        } catch {}
+      } catch (refErr) { console.error('Refund failed:', refErr.message) }
     }
 
     res.json(success(results))
@@ -424,9 +457,16 @@ app.get('/tasks/pricing', async (req, res) => {
 // 余额
 app.get('/points/balance', authMiddleware, async (req, res) => {
   try {
-    const data = await supabaseRpc('get_balance', { p_user_id: req.user.id })
-    res.json(success({ balance: typeof data === 'number' ? data : (data?.points || 0) }))
+    const userList = await supabaseGet('users', {
+      select: 'points,points_balance',
+      filter: { 'id': `eq.${req.user.id}` },
+      single: true
+    })
+    const user = Array.isArray(userList) ? userList[0] : userList
+    const balance = Number(user?.points ?? user?.points_balance ?? 0)
+    res.json(success({ balance }))
   } catch (e) {
+    console.error('Get balance error:', e.message)
     res.status(500).json(error('查询积分失败'))
   }
 })
@@ -578,22 +618,43 @@ app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
 // 更新用户积分
 app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { amount, reason } = req.body
+    const { amount, reason, remark } = req.body
     const targetId = req.params.id
     const adjustAmount = Number(amount)
     if (!adjustAmount) return res.status(400).json(error('请输入调整金额'))
 
-    await supabaseRpc('admin_adjust_points', {
-      p_user_id: targetId,
-      p_amount: adjustAmount,
-      p_reason: reason || '管理员手动调整'
+    // 先查当前用户和余额
+    const userList = await supabaseGet('users', {
+      select: '*,points,points_balance',
+      filter: { 'id': `eq.${targetId}` },
+      single: true
     })
+    const user = Array.isArray(userList) ? userList[0] : userList
+    if (!user) return res.status(404).json(error('用户不存在'))
 
-    // 查新余额
-    const data = await supabaseRpc('get_balance', { p_user_id: targetId })
-    res.json(success({ new_balance: typeof data === 'number' ? data : (data?.points || 0) }, '调整成功'))
+    // 兼容两种列名：points 或 points_balance
+    const currentBalance = Number(user.points ?? user.points_balance ?? 0)
+    const newBalance = currentBalance + adjustAmount
+    if (newBalance < 0) return res.status(400).json(error('调整后余额不能为负数'))
+
+    // 直接更新余额（不用 RPC）
+    await supabaseUpdate('users', targetId, { points: newBalance })
+
+    // 写流水记录
+    try {
+      await supabasePost('points_records', {
+        user_id: targetId,
+        amount: adjustAmount,
+        balance_after: newBalance,
+        type: 'admin_adjust',
+        remark: reason || remark || '管理员手动调整'
+      })
+    } catch {}
+
+    res.json(success({ new_balance: newBalance }, '调整成功'))
   } catch (e) {
-    res.status(500).json(error('调整积分失败'))
+    console.error('Adjust points error:', e.message)
+    res.status(500).json(error('调整积分失败: ' + e.message))
   }
 })
 
