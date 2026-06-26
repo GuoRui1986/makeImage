@@ -781,23 +781,25 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
 
 // 定价管理（返回前端 Pricing.vue 期望的格式）
 app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
+  // 默认定价数据（数据库不可用时使用）
+  const defaultData = {
+    pricing: [
+      { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
+      { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
+      { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
+      { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 },
+      { id: 'new-seedream-standard', model_name: 'seedream', quality: 'standard', points_per_image: 2 },
+      { id: 'new-seedream-hd', model_name: 'seedream', quality: 'hd', points_per_image: 4 }
+    ],
+    i2i_extra: 1
+  }
+
   try {
     const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
     const items = Array.isArray(list) ? list : (list ? [list] : [])
 
-    // 如果表为空，返回默认定价数据（匹配前端期望的格式）
     if (items.length === 0) {
-      return json(success({
-        pricing: [
-          { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
-          { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
-          { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
-          { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 },
-          { id: 'new-seedream-standard', model_name: 'seedream', quality: 'standard', points_per_image: 2 },
-          { id: 'new-seedream-hd', model_name: 'seedream', quality: 'hd', points_per_image: 4 }
-        ],
-        i2i_extra: 1
-      }))
+      return res.json(success(defaultData))
     }
 
     // 转换数据库格式为前端期望格式：{ pricing: [...], i2iExtra }
@@ -814,19 +816,10 @@ app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
       })
       if (item.i2i_extra !== undefined) i2iExtra = Number(item.i2i_extra)
     }
-    json(success({ pricing, i2i_extra }))
+    res.json(success({ pricing, i2i_extra }))
   } catch (e) {
     console.error('Admin pricing error:', e.message)
-    // 表不存在时返回默认数据
-    json(success({
-      pricing: [
-        { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
-        { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
-        { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
-        { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 }
-      ],
-      i2i_extra: 1
-    }))
+    res.json(success(defaultData))
   }
 })
 
