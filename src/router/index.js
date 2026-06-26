@@ -34,7 +34,7 @@ const router = createRouter({
 })
 
 // 路由守卫
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, from, next) => {
   const authStore = useAuthStore()
   const token = localStorage.getItem('token')
 
@@ -47,9 +47,9 @@ router.beforeEach((to, from, next) => {
     return next('/login')
   }
 
-  // 如果 store 还没初始化，先加载用户信息
+  // 如果 store 还没初始化，先加载用户信息（等待完成后再判断）
   if (!authStore.user) {
-    authStore.initFromStorage()
+    await authStore.fetchUserInfo().catch(() => {})
   }
 
   // 管理员路由检查

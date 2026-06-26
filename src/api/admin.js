@@ -10,12 +10,15 @@ export const adminApi = {
 
   // 定价配置
   getPricing: () => request.get('/admin/pricing'),
-  updatePricing: (pricing) => request.put('/admin/pricing', { pricing }),
+  updatePricing: (pricing) => {
+    if (pricing?.id) return request.put(`/admin/pricing/${pricing.id}`, pricing)
+    return request.put('/admin/pricing', { ...pricing })
+  },
 
   // 全局记录
-  getPointsFlow: (params) => request.get('/admin/records/points', { params }),
-  getImageRecords: (params) => request.get('/admin/records/images', { params }),
-  getImageRecordDetail: (id) => request.get(`/admin/records/images/${id}`),
+  getPointsFlow: (params) => request.get('/admin/records', { params }),
+  getImageRecords: (params) => request.get('/history/list', { params }),
+  getImageRecordDetail: (id) => request.get(`/history/detail/${id}`),
 
   // 系统设置
   getSettings: () => request.get('/admin/settings'),

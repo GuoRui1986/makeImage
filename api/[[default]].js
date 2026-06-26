@@ -181,7 +181,7 @@ app.post('/auth/login', async (req, res) => {
           username: user.username,
           nickname: user.nickname || user.username,
           points: 10000,
-          role: 'admin',
+          role: userRole,
           status: 'active',
           last_login: new Date().toISOString()
         })
@@ -192,7 +192,7 @@ app.post('/auth/login', async (req, res) => {
 
     res.json(success({
       token,
-      userInfo: { id: user.id, username: user.username, role: 'admin' }
+      userInfo: { id: user.id, username: user.username, nickname: user.nickname || user.username, role: userRole }
     }, '登录成功'))
   } catch (e) {
     console.error('Login error:', e)
@@ -305,8 +305,18 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
 
       const result = await resp.json()
       if (!resp.ok || !result.task_id) {
-        // 退还积分
-        try { await supabaseRpc('refund_points', { p_user_id: userId, p_amount: totalCost }) } catch {}
+        // 退还积分（直接 UPDATE，不用 RPC）
+        try {
+          const uRec2 = await supabaseGet('users', {
+            select: '*',
+            filter: { 'id': `eq.${userId}` },
+            single: true
+          })
+          const u2 = Array.isArray(uRec2) ? uRec2[0] : uRec2
+          const bal2 = Number(u2?.points ?? u2?.points_balance ?? 0) + totalCost
+          const refCol2 = u2?.hasOwnProperty('points') ? 'points' : (u2?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
+          await supabaseUpdate('users', userId, { [refCol2]: bal2 })
+        } catch {}
         return res.status(502).json(error(result.message || `调用AI接口失败: ${resp.status}`))
       }
       taskIds.push(String(result.task_id))
@@ -766,7 +776,7 @@ app.get('/admin/records', authMiddleware, adminOnly, async (req, res) => {
     if (userId) filter['user_id'] = `eq.${userId}`
 
     const list = await supabaseGet('points_records', {
-      select: '*,user_id(username)',
+      select: '*',
       filter,
       order: 'created_at.desc',
       limit: size,
