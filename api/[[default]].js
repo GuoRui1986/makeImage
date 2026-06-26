@@ -779,15 +779,90 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
   }
 })
 
-// 定价管理
+// 定价管理（返回前端 Pricing.vue 期望的格式）
 app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   try {
     const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
-    res.json(success(Array.isArray(list) ? list : (list ? [list] : [])))
+    const items = Array.isArray(list) ? list : (list ? [list] : [])
+
+    // 如果表为空，返回默认定价数据（匹配前端期望的格式）
+    if (items.length === 0) {
+      return json(success({
+        pricing: [
+          { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
+          { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
+          { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
+          { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 },
+          { id: 'new-seedream-standard', model_name: 'seedream', quality: 'standard', points_per_image: 2 },
+          { id: 'new-seedream-hd', model_name: 'seedream', quality: 'hd', points_per_image: 4 }
+        ],
+        i2i_extra: 1
+      }))
+    }
+
+    // 转换数据库格式为前端期望格式：{ pricing: [...], i2iExtra }
+    const pricing = []
+    let i2iExtra = 1
+    for (const item of items) {
+      const modelName = item.model || item.model_name || 'image2'
+      const quality = item.quality || (item.hd_only ? 'hd' : 'standard')
+      pricing.push({
+        id: item.id,
+        model_name: modelName,
+        quality,
+        points_per_image: Number(item.points) || Number(item.points_per_image) || 2
+      })
+      if (item.i2i_extra !== undefined) i2iExtra = Number(item.i2i_extra)
+    }
+    json(success({ pricing, i2i_extra }))
   } catch (e) {
-    // 表可能不存在，返回空数组而不是500
     console.error('Admin pricing error:', e.message)
-    res.json(success([]))
+    // 表不存在时返回默认数据
+    json(success({
+      pricing: [
+        { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
+        { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
+        { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
+        { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 }
+      ],
+      i2i_extra: 1
+    }))
+  }
+})
+
+// 批量保存定价（前端调用 PUT /admin/pricing，无 :id）
+app.put('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    // 前端发送格式：{ pricing: [{ id, pointsPerImage }] } 或直接数组
+    const items = req.body.pricing || req.body
+    const updates = Array.isArray(items) ? items : [items]
+
+    for (const item of updates) {
+      const { id, pointsPerImage } = item
+      if (!id) continue
+      const pts = Number(pointsPerImage)
+      // new- 前缀表示是新记录需要创建
+      if (String(id).startsWith('new-')) {
+        try {
+          await supabasePost('pricing_config', {
+            model: id.replace('new-', '').replace('-standard', '').replace('-hd', ''),
+            quality: id.includes('-hd') ? 'hd' : 'standard',
+            points: pts,
+            status: 'active'
+          })
+        } catch {}
+      } else {
+        // 更新已有记录
+        try {
+          await supabaseUpdate('pricing_config', id, { points: pts })
+        } catch {}
+      }
+    }
+
+    res.json(success(null, '保存成功'))
+  } catch (e) {
+    console.error('Batch save pricing error:', e.message)
+    res.status(500).json(error('保存失败'))
   }
 })
 
