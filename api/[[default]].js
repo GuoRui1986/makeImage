@@ -344,13 +344,19 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
       let apiPath, requestBody, contentType
 
       if (model === 'image2') {
-        apiPath = '/v1/images/generations'
-        requestBody = JSON.stringify({
+        // 多米API: image2 必须带 ?async=true
+        apiPath = '/v1/images/generations?async=true'
+        const body = {
           model: 'gpt-image-2',
           prompt: prompt,
           image_size: size || '1024x1024',
           n: 1
-        })
+        }
+        // 图生图模式：附加参考图
+        if (refImageUrl) {
+          body.image = refImageUrl
+        }
+        requestBody = JSON.stringify(body)
         contentType = 'application/json'
       } else if (model === 'banana' || model === 'nano-banana' || model === 'nano-banana-2') {
         apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'

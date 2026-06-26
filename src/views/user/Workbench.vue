@@ -21,7 +21,7 @@
                 />
               </el-select>
               <div v-if="currentModelPoints" class="price-hint">
-                单张消耗 {{ currentModelPoints }} 积分{{ config.mode === 'img2img' ? ` + ${i2iExtra} 图生图` : '' }}
+                单张消耗 {{ currentModelPoints }} 积分{{ config.mode === 'img2img' ? ` + ${pricingData.i2iExtra} 图生图` : '' }}
               </div>
             </el-form-item>
 
