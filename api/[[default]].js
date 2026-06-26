@@ -153,8 +153,8 @@ app.post('/auth/login', async (req, res) => {
       return res.status(401).json(error('用户名或密码错误'))
     }
 
-    // 使用数据库中的实际角色，不再硬编码为 admin
-    const userRole = user.role || 'user'
+    // admin_users 表中的用户默认角色为 admin（不是 user）
+    const userRole = user.role || 'admin'
 
     const token = jwt.sign(
       { id: user.id, username: user.username, role: userRole },
@@ -214,14 +214,21 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
     const numImages = parseInt(n) || parseInt(count) || 1
     if (!model || !prompt) return res.status(400).json(error('缺少必要参数'))
 
-    // 查定价
-    const pricingList = await supabaseGet('pricing_config', {
-      select: '*',
-      filter: { 'model': `eq.${model}`, 'status': `eq.active` },
-      single: true
-    })
-    const pricing = Array.isArray(pricingList) ? pricingList[0] : pricingList
-    if (!pricing) return res.status(400).json(error('该模型暂未开放'))
+    // 查定价（带默认值兜底）
+    const defaultPricing = { points: model === 'banana' ? 1 : 40 }
+    let pricing
+    try {
+      const pricingList = await supabaseGet('pricing_config', {
+        select: '*',
+        filter: { 'model': `eq.${model}`, 'status': `eq.active` },
+        single: true
+      })
+      pricing = Array.isArray(pricingList) ? pricingList[0] : pricingList
+    } catch (e) {
+      console.error('Pricing query failed, using default:', e.message)
+      pricing = null
+    }
+    if (!pricing) pricing = defaultPricing
 
     const totalCost = pricing.points * numImages
 
@@ -455,17 +462,45 @@ app.post('/tasks/upload-ref', authMiddleware, async (req, res) => {
   }
 })
 
-// 获取定价
+// 获取定价（返回前端期望的格式：{ pricing: { modelName: { standard, hd } }, i2iExtra }）
 app.get('/tasks/pricing', async (req, res) => {
+  // 默认定价（pricing_config 表为空或不存在时使用）
+  const defaultPricing = {
+    pricing: {
+      image2: { standard: 40, hd: 80 },
+      banana: { standard: 1, hd: 2 }
+    },
+    i2iExtra: 0
+  }
+
   try {
     const list = await supabaseGet('pricing_config', {
       select: '*',
       filter: { 'status': `eq.active` },
       order: 'points.asc'
     })
-    res.json(success(Array.isArray(list) ? list : []))
+    const items = Array.isArray(list) ? list : (list ? [list] : [])
+
+    if (items.length === 0) {
+      return res.json(success(defaultPricing))
+    }
+
+    // 将数据库格式转换为前端期望的格式
+    const pricing = {}
+    let i2iExtra = 0
+    for (const item of items) {
+      const model = item.model || item.model_name || 'image2'
+      const pts = Number(item.points) || 40
+      pricing[model] = {
+        standard: pts,
+        hd: Math.round(pts * 2)
+      }
+      if (item.i2i_extra) i2iExtra = Number(item.i2i_extra)
+    }
+    res.json(success({ pricing, i2iExtra }))
   } catch (e) {
-    res.status(500).json(error('获取定价失败'))
+    console.error('Get pricing error:', e.message)
+    res.json(success(defaultPricing))
   }
 })
 
@@ -748,9 +783,11 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
 app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   try {
     const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
-    res.json(success(Array.isArray(list) ? list : []))
+    res.json(success(Array.isArray(list) ? list : (list ? [list] : [])))
   } catch (e) {
-    res.status(500).json(error('获取定价配置失败'))
+    // 表可能不存在，返回空数组而不是500
+    console.error('Admin pricing error:', e.message)
+    res.json(success([]))
   }
 })
 
