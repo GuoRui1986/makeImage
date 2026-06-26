@@ -244,37 +244,129 @@ const handleRefUpload = async (options) => {
   uploading.value = true
   try {
     const file = options.file
-    // 转成 base64 发给后端，后端上传到 Supabase Storage
-    const reader = new FileReader()
-    reader.onload = async () => {
-      const base64 = reader.result.split(',')[1]
+
+    // 方案1：前端直传 Supabase Storage（绕过后端413限制）
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+    const bucket = 'guo rui'  // SUPABASE_STORAGE_BUCKET（注意有空格）
+
+    let uploadUrl = ''
+    const fileName = `ref-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`
+
+    if (supabaseUrl && supabaseAnonKey && bucket) {
+      try {
+        // 读取文件为 ArrayBuffer，转为 File 对象
+        const arrayBuffer = await file.arrayBuffer()
+        const uploadFile = new File([arrayBuffer], fileName, { type: 'image/jpeg' })
+
+        // 调用 Supabase Storage REST API 上传
+        const formData = new FormData()
+        formData.append('file', uploadFile)
+        formData.append('uploadType', 'image')
+
+        const res = await fetch(
+          `${supabaseUrl}/rest/v1/storage/v0/upload/object/${bucket}/${fileName}`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${supabaseAnonKey}`,
+              'apikey': supabaseAnonKey,
+              'Prefer': 'return=representation',
+            },
+            body: formData,
+          }
+        )
+
+        if (res.ok) {
+          // 生成公开访问 URL（假设 bucket 是 public 的）
+          uploadUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${fileName}`
+        } else {
+          console.warn('Supabase直传失败，尝试降级:', res.status)
+          throw new Error(`Supabase upload failed: ${res.status}`)
+        }
+      } catch (directErr) {
+        console.warn('直传Supabase失败，尝试Canvas压缩降级:', directErr.message)
+
+        // 方案2：Canvas 压缩后走后端
+        try {
+          const compressedBase64 = await compressImage(file, 1024, 1024, 0.75)
+          const res = await taskApi.uploadRef({
+            image: compressedBase64,
+            imageBase64: compressedBase64.split(',')[1],
+            filename: file.name
+          })
+          if (res.data?.url) {
+            uploadUrl = res.data.url
+          } else {
+            throw new Error('服务器未返回URL')
+          }
+        } catch (fallbackErr) {
+          console.error('所有上传方式均失败:', fallbackErr)
+          throw fallbackErr
+        }
+      }
+    } else {
+      // 没有Supabase配置，直接走后端（可能413但至少尝试）
+      const reader = new FileReader()
+      const base64Promise = new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = () => reject(new Error('图片读取失败'))
+        reader.readAsDataURL(file)
+      })
+      const base64 = await base64Promise
+
       try {
         const res = await taskApi.uploadRef({
-          image: 'data:image/' + (file.type.includes('png') ? 'png' : 'jpeg') + ';base64,' + base64,
-          imageBase64: base64,
+          image: base64,
+          imageBase64: base64.split(',')[1],
           filename: file.name
         })
         if (res.data?.url) {
-          config.referenceImageUrl = res.data.url
-          ElMessage.success('参考图上传成功')
+          uploadUrl = res.data.url
         } else {
           throw new Error('服务器未返回URL')
         }
       } catch (err) {
-        ElMessage.warning('参考图上传失败，请重试')
-      } finally {
-        uploading.value = false
+        throw err
       }
     }
-    reader.onerror = () => {
-      ElMessage.warning('图片读取失败')
-      uploading.value = false
+
+    if (uploadUrl) {
+      config.referenceImageUrl = uploadUrl
+      ElMessage.success('参考图上传成功')
+    } else {
+      throw new Error('无法获取图片URL')
     }
-    reader.readAsDataURL(file)
   } catch (err) {
-    ElMessage.warning('参考图上传失败，请重试')
+    ElMessage.warning('参考图上传失败: ' + (err.message || '请重试'))
+  } finally {
     uploading.value = false
   }
+}
+
+/** Canvas 压缩图片到指定尺寸和质量 */
+const compressImage = (file, maxWidth, maxHeight, quality) => {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      let { width, height } = img
+
+      // 等比缩放
+      if (width > maxWidth || height > maxHeight) {
+        const ratio = Math.min(maxWidth / width, maxHeight / height)
+        width = Math.round(width * ratio)
+        height = Math.round(height * ratio)
+      }
+
+      canvas.width = width
+      canvas.height = height
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', quality))
+    }
+    img.onerror = () => reject(new Error('图片加载失败'))
+    img.src = URL.createObjectURL(file)
+  })
 }
 
 const handleGenerate = async () => {
