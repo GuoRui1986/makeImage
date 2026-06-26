@@ -1,14 +1,21 @@
 /**
  * AI生图工具 - IGA Pages Serverless Function
- * 精简依赖版本: 仅 express + jsonwebtoken
- * 其余全部使用 Node.js 内置模块
+ * 
+ * 【重要】实际数据库 schema（来自 supabase-schema.sql）：
+ * 
+ * admin_users: id(SERIAL), username(TEXT), password_hash(TEXT), created_at(TIMESTAMPTZ) — 仅4列，无role/nickname/status
+ * users: id(SERIAL), username(TEXT), password_hash(TEXT), points_balance(DECIMAL), status(SMALLINT), created_at(TIMESTAMPTZ), last_login_at(TIMESTAMPTZ) — 7列，无admin_user_id/nickname/points/role
+ * points_config: id(SERIAL), model_name(TEXT), quality(TEXT), points_per_image(DECIMAL) — 4列，无model/points/status
+ * points_records: id, user_id, amount, balance_after, type, related_task_id, remark, created_at — 8列
+ * image_tasks: id, user_id, model_name, mode, prompt, aspect_ratio, quality, image_count, reference_image, points_cost, status, result_images, fail_reason, duomi_task_ids, created_at, finished_at — 16列
+ * system_config: id, config_key, config_value, updated_at — 4列，无key/value
  */
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
 import bcrypt from 'bcryptjs'
 
-// ====== 配置（适配 IGA Pages 环境变量） ======
+// ====== 配置 ======
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
 const DUOMI_API_KEY = process.env.DUOMI_API_KEY || ''
@@ -55,8 +62,10 @@ async function supabaseGet(table, options = {}) {
 
   const url = `${SUPABASE_URL}/rest/v1/${table}?${params}`
   const res = await fetch(url, { headers: supabaseHeaders() })
-  if (!res.ok) throw new Error(`Supabase GET ${table} error: ${res.status}`)
-  // Handle single object vs array
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(`Supabase GET ${table} error: ${res.status} ${errText}`)
+  }
   const text = await res.text()
   if (!text) return options.single ? null : []
   const data = JSON.parse(text)
@@ -85,7 +94,11 @@ async function supabaseUpdate(table, id, body, idCol = 'id') {
     headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
     body: JSON.stringify(body)
   })
-  if (!res.ok) throw new Error(`Supabase UPDATE ${table} error: ${res.status}`)
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(`Supabase UPDATE ${table} error: ${res.status} ${errText}`)
+  }
+  return res.json()
 }
 
 async function supabaseRpc(fnName, params = {}) {
@@ -104,10 +117,8 @@ async function supabaseRpc(fnName, params = {}) {
 
 // ====== JWT 鉴权中间件 ======
 function authMiddleware(req, res, next) {
-  // 兼容两种 header: Authorization (Bearer token) 和 x-auth-token
   let token = req.headers['x-auth-token']
   if (!token && req.headers.authorization) {
-    // 从 Authorization: Bearer xxx 中提取 token
     const auth = req.headers.authorization
     token = auth.startsWith('Bearer ') ? auth.slice(7) : auth
   }
@@ -133,14 +144,30 @@ function hashPassword(password) {
   return crypto.createHash('sha256').update(password + PASSWORD_SALT).digest('hex')
 }
 
+// 兼容验证：先SHA256，再bcrypt（数据库初始数据用crypt/bcrypt）
+async function verifyPassword(password, storedHash) {
+  // SHA256 匹配
+  if (storedHash === hashPassword(password)) return true
+  // bcrypt 匹配
+  if (storedHash.startsWith('$2a$') || storedHash.startsWith('$2b$')) {
+    try {
+      return await bcrypt.compare(password, storedHash)
+    } catch (e) {
+      console.warn('bcrypt compare error:', e.message)
+    }
+  }
+  return false
+}
+
 // ====== 路由: 认证 ======
 
-// 登录（管理员和用户共用，根据数据库 role 字段区分）
+// 登录
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body
     if (!username || !password) return res.status(400).json(error('请输入用户名和密码'))
 
+    // admin_users 只有 id,username,password_hash,created_at 四列（无role/nickname/status）
     const users = await supabaseGet('admin_users', {
       select: '*',
       filter: { 'username': `eq.${username}` },
@@ -150,34 +177,40 @@ app.post('/auth/login', async (req, res) => {
     if (!users) return res.status(401).json(error('用户名或密码错误'))
     const user = Array.isArray(users) ? users[0] : users
 
-    // 兼容两种密码哈希格式：SHA256（新用户）和 bcrypt（初始数据/旧数据）
-    let passwordOk = false
-    if (user.password_hash === hashPassword(password)) {
-      passwordOk = true
-    } else if (user.password_hash.startsWith('$2a$') || user.password_hash.startsWith('$2b$')) {
-      // bcrypt 格式，用 bcryptjs 验证
-      try {
-        passwordOk = await bcrypt.compare(password, user.password_hash)
-      } catch (bcryptErr) {
-        console.warn('bcrypt compare error:', bcryptErr.message)
-      }
-    }
-    if (!passwordOk) {
+    if (!await verifyPassword(password, user.password_hash)) {
       return res.status(401).json(error('用户名或密码错误'))
     }
 
-    // admin_users 表中的用户默认角色为 admin（不是 user）
-    const userRole = user.role || 'admin'
+    // 判断角色：查 users 表的 status 列
+    // admin_users 没有 role 列，用 username 查 users 表判断
+    let userRole = 'admin' // 默认为admin（管理员账号）
+    let userIdForJwt = user.id
+    try {
+      const userRec = await supabaseGet('users', {
+        select: 'id,username,points_balance,status',
+        filter: { 'username': `eq.${user.username}` },
+        single: true
+      })
+      const u = Array.isArray(userRec) ? userRec[0] : userRec
+      if (u && u.id !== user.id) {
+        // users表有独立记录，说明是普通用户（管理员admin是users表id=1）
+        // admin 的 users.id 和 admin_users.id 可能不同，但 username='admin' 的肯定是管理员
+        if (user.username !== 'admin') {
+          userRole = 'user'
+          userIdForJwt = u.id // 用 users 表的 id 作为业务主键
+        }
+      }
+    } catch (e) {
+      console.warn('Role check failed, assuming admin:', e.message)
+    }
 
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: userRole },
+      { id: userIdForJwt, username: user.username, role: userRole },
       JWT_SECRET,
       { expiresIn: '24h' }
     )
 
-    const payload = { token, userInfo: { id: user.id, username: user.username, nickname: user.nickname || user.username, role: userRole } }
-
-    // 同步到 users 表
+    // 同步到 users 表（更新 last_login_at）
     try {
       const existingUsers = await supabaseGet('users', {
         select: 'id',
@@ -203,7 +236,7 @@ app.post('/auth/login', async (req, res) => {
 
     res.json(success({
       token,
-      userInfo: { id: user.id, username: user.username, nickname: user.nickname || user.username, role: userRole }
+      userInfo: { id: userIdForJwt, username: user.username, nickname: user.username, role: userRole }
     }, '登录成功'))
   } catch (e) {
     console.error('Login error:', e)
@@ -214,13 +247,12 @@ app.post('/auth/login', async (req, res) => {
 // 获取当前用户信息
 app.get('/auth/me', authMiddleware, async (req, res) => {
   try {
-    // 从 JWT payload 中获取基本信息
     const userInfo = {
       id: req.user.id,
       username: req.user.username,
-      role: req.user.role
+      role: req.user.role,
+      nickname: req.user.username // admin_users 和 users 都没有 nickname 列
     }
-    // 从 users 表获取积分余额
     try {
       const userRec = await supabaseGet('users', {
         select: '*',
@@ -229,8 +261,7 @@ app.get('/auth/me', authMiddleware, async (req, res) => {
       })
       const user = Array.isArray(userRec) ? userRec[0] : userRec
       if (user) {
-        userInfo.nickname = user.nickname || user.username
-        userInfo.pointsBalance = Number(user.points ?? user.points_balance ?? 0)
+        userInfo.pointsBalance = Number(user.points_balance ?? 0)
       }
     } catch {}
     res.json(success(userInfo))
@@ -245,7 +276,7 @@ app.get('/auth/me', authMiddleware, async (req, res) => {
 app.post('/tasks/create', authMiddleware, async (req, res) => {
   try {
     const body = req.body
-    // 兼容前端两种字段命名格式（camelCase 和 snake_case）
+    // 兼容前端两种字段命名格式
     const model = body.model || body.modelName
     const prompt = body.prompt
     const size = body.size || body.aspectRatio
@@ -254,25 +285,25 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
     const numImages = parseInt(count) || 1
     if (!model || !prompt) return res.status(400).json(error('缺少必要参数'))
 
-    // 查定价（带默认值兜底）
-    const defaultPricing = { points: model === 'banana' ? 1 : 40 }
-    let pricing
+    // 查定价（points_config 表，列: model_name, quality, points_per_image）
+    let pointsPerImage = model === 'banana' ? 1 : 40 // 默认值
     try {
-      const pricingList = await supabaseGet('pricing_config', {
+      const pricingList = await supabaseGet('points_config', {
         select: '*',
-        filter: { 'model': `eq.${model}`, 'status': `eq.active` },
+        filter: { 'model_name': `eq.${model}` },
         single: true
       })
-      pricing = Array.isArray(pricingList) ? pricingList[0] : pricingList
+      const pricing = Array.isArray(pricingList) ? pricingList[0] : pricingList
+      if (pricing) {
+        pointsPerImage = Number(pricing.points_per_image ?? pricing.points_per_image ?? 40)
+      }
     } catch (e) {
-      console.error('Pricing query failed, using default:', e.message)
-      pricing = null
+      console.warn('Pricing query failed, using default:', e.message)
     }
-    if (!pricing) pricing = defaultPricing
 
-    const totalCost = pricing.points * numImages
+    const totalCost = pointsPerImage * numImages
 
-    // 检查余额（直接查 users 表，不用 RPC）
+    // 检查余额（users 表列: points_balance）
     const userId = req.user.id
     const userRec = await supabaseGet('users', {
       select: '*',
@@ -280,23 +311,23 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
       single: true
     })
     const userObj = Array.isArray(userRec) ? userRec[0] : userRec
-    const currentBalance = Number(userObj?.points ?? userObj?.points_balance ?? 0)
+    const currentBalance = Number(userObj?.points_balance ?? 0)
 
     if (currentBalance < totalCost) {
       return res.status(400).json(error(`积分不足，当前${currentBalance}，需要${totalCost}`))
     }
 
-    // 扣积分（直接 UPDATE，不用 RPC）
+    // 扣积分（直接 UPDATE users 表的 points_balance 列）
     const newBalance = currentBalance - totalCost
-    const balCol = userObj?.hasOwnProperty('points') ? 'points' : (userObj?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
     try {
-      await supabaseUpdate('users', userId, { [balCol]: newBalance })
+      await supabaseUpdate('users', userId, { points_balance: newBalance })
       try {
         await supabasePost('points_records', {
           user_id: userId,
           amount: -totalCost,
           balance_after: newBalance,
           type: 'generate_deduct',
+          related_task_id: null,
           remark: `生成图片-${model}`
         })
       } catch {}
@@ -321,15 +352,7 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
           n: 1
         })
         contentType = 'application/json'
-      } else if (model === 'banana' || model === 'nano-banana') {
-        apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
-        const formData = new URLSearchParams()
-        formData.append('prompt', prompt)
-        if (refImageUrl) formData.append('image_url', refImageUrl)
-        if (size) formData.append('size', size)
-        requestBody = formData.toString()
-        contentType = 'application/x-www-form-urlencoded'
-      } else if (model === 'nano-banana-2') {
+      } else if (model === 'banana' || model === 'nano-banana' || model === 'nano-banana-2') {
         apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
         const formData = new URLSearchParams()
         formData.append('prompt', prompt)
@@ -352,34 +375,37 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
 
       const result = await resp.json()
       if (!resp.ok || !result.task_id) {
-        // 退还积分（直接 UPDATE，不用 RPC）
+        // 退还积分
         try {
           const uRec2 = await supabaseGet('users', {
-            select: '*',
+            select: 'points_balance',
             filter: { 'id': `eq.${userId}` },
             single: true
           })
           const u2 = Array.isArray(uRec2) ? uRec2[0] : uRec2
-          const bal2 = Number(u2?.points ?? u2?.points_balance ?? 0) + totalCost
-          const refCol2 = u2?.hasOwnProperty('points') ? 'points' : (u2?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
-          await supabaseUpdate('users', userId, { [refCol2]: bal2 })
+          const bal2 = Number(u2?.points_balance ?? 0) + totalCost
+          await supabaseUpdate('users', userId, { points_balance: bal2 })
         } catch {}
         return res.status(502).json(error(result.message || `调用AI接口失败: ${resp.status}`))
       }
       taskIds.push(String(result.task_id))
     }
 
-    // 写入数据库
+    // 写入 image_tasks 表（列名严格对齐 schema）
     const taskRecord = await supabasePost('image_tasks', {
       user_id: userId,
-      model: model,
+      model_name: model,           // schema 列: model_name
+      mode: model,                  // schema 列: mode
       prompt: prompt,
-      size: size || '1024x1024',
-      count: numImages,
-      task_ids: JSON.stringify(taskIds),
-      status: 'processing',
+      aspect_ratio: size || '1024x1024', // schema 列: aspect_ratio
+      quality: 'standard',
+      image_count: numImages,       // schema 列: image_count
+      reference_image: refImageUrl || null, // schema 列: reference_image
       points_cost: totalCost,
-      created_at: new Date().toISOString()
+      status: 'processing',
+      result_images: null,
+      fail_reason: null,
+      duomi_task_ids: JSON.stringify(taskIds) // schema 列: duomi_task_ids
     })
 
     const taskId = Array.isArray(taskRecord) ? taskRecord[0]?.id : taskRecord?.id
@@ -403,7 +429,7 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
     const task = Array.isArray(tasks) ? tasks[0] : tasks
     if (!task) return res.status(404).json(error('任务不存在'))
 
-    const taskIds = JSON.parse(task.task_ids || '[]')
+    const taskIds = JSON.parse(task.duomi_task_ids || '[]') // schema 列: duomi_task_ids
     const results = []
 
     for (const tid of taskIds) {
@@ -434,27 +460,27 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
       await supabaseUpdate('image_tasks', taskId, {
         status: 'completed',
         result_images: JSON.stringify(images),
-        completed_at: new Date().toISOString()
+        finished_at: new Date().toISOString() // schema 列: finished_at（不是completed_at）
       })
     } else if (allDone && !allSuccess) {
       await supabaseUpdate('image_tasks', taskId, { status: 'failed' })
-      // 退积分（直接 UPDATE，不用 RPC）
+      // 退积分
       try {
         const uRec = await supabaseGet('users', {
-          select: '*',
+          select: 'points_balance',
           filter: { 'id': `eq.${task.user_id}` },
           single: true
         })
         const u = Array.isArray(uRec) ? uRec[0] : uRec
-        const bal = Number(u?.points ?? u?.points_balance ?? 0) + Number(task.points_cost || 0)
-        const refCol = u?.hasOwnProperty('points') ? 'points' : (u?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
-        await supabaseUpdate('users', task.user_id, { [refCol]: bal })
+        const bal = Number(u?.points_balance ?? 0) + Number(task.points_cost || 0)
+        await supabaseUpdate('users', task.user_id, { points_balance: bal })
         try {
           await supabasePost('points_records', {
             user_id: task.user_id,
             amount: Number(task.points_cost || 0),
             balance_after: bal,
             type: 'fail_refund',
+            related_task_id: taskId,
             remark: '生成失败返还积分'
           })
         } catch {}
@@ -470,7 +496,6 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
 // 上传参考图到 Supabase Storage
 app.post('/tasks/upload-ref', authMiddleware, async (req, res) => {
   try {
-    // 兼容前端两种字段名: image 和 imageBase64
     const base64 = req.body.image || req.body.imageBase64
     if (!base64) return res.status(400).json(error('没有收到图片数据'))
 
@@ -497,15 +522,14 @@ app.post('/tasks/upload-ref', authMiddleware, async (req, res) => {
     }
 
     const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${fileName}`
-    res.json(success({ url: publicUrl }), '上传成功')
+    res.json(success({ url: publicUrl }, '上传成功'))
   } catch (e) {
     res.status(500).json(error('上传失败: ' + e.message))
   }
 })
 
-// 获取定价（返回前端期望的格式：{ pricing: { modelName: { standard, hd } }, i2iExtra }）
+// 获取定价（前端用户端，返回 { pricing: { modelName: { standard, hd } }, i2iExtra } 格式）
 app.get('/tasks/pricing', async (req, res) => {
-  // 默认定价（pricing_config 表为空或不存在时使用）
   const defaultPricing = {
     pricing: {
       image2: { standard: 40, hd: 80 },
@@ -515,28 +539,23 @@ app.get('/tasks/pricing', async (req, res) => {
   }
 
   try {
-    const list = await supabaseGet('pricing_config', {
-      select: '*',
-      filter: { 'status': `eq.active` },
-      order: 'points.asc'
-    })
+    // 实际表名: points_config，列: model_name, quality, points_per_image
+    const list = await supabaseGet('points_config', { select: '*', order: 'id.asc' })
     const items = Array.isArray(list) ? list : (list ? [list] : [])
 
     if (items.length === 0) {
       return res.json(success(defaultPricing))
     }
 
-    // 将数据库格式转换为前端期望的格式
     const pricing = {}
     let i2iExtra = 0
     for (const item of items) {
-      const model = item.model || item.model_name || 'image2'
-      const pts = Number(item.points) || 40
-      pricing[model] = {
-        standard: pts,
-        hd: Math.round(pts * 2)
-      }
-      if (item.i2i_extra) i2iExtra = Number(item.i2i_extra)
+      const model = item.model_name || 'image2' // schema 列: model_name
+      const quality = item.quality || 'standard' // schema 列: quality
+      const pts = Number(item.points_per_image ?? 40) // schema 列: points_per_image
+      if (!pricing[model]) pricing[model] = {}
+      pricing[model][quality] = pts
+      // 没有专门的 i2i_extra 字段，默认0
     }
     res.json(success({ pricing, i2iExtra }))
   } catch (e) {
@@ -551,12 +570,12 @@ app.get('/tasks/pricing', async (req, res) => {
 app.get('/points/balance', authMiddleware, async (req, res) => {
   try {
     const userList = await supabaseGet('users', {
-      select: '*',
+      select: 'id,points_balance',
       filter: { 'id': `eq.${req.user.id}` },
       single: true
     })
     const user = Array.isArray(userList) ? userList[0] : userList
-    const balance = Number(user?.points ?? user?.points_balance ?? 0)
+    const balance = Number(user?.points_balance ?? 0)
     res.json(success({ balance }))
   } catch (e) {
     console.error('Get balance error:', e.message)
@@ -572,13 +591,9 @@ app.get('/points/records', authMiddleware, async (req, res) => {
     const offset = (page - 1) * size
 
     const q = { 'user_id': `eq.${req.user.id}` }
-    const [list, countResult] = await Promise.all([
-      supabaseGet('points_records', { select: '*', filter: q, order: 'created_at.desc', limit: size, offset }),
-      supabaseGet('points_records', { select: 'id', filter: q, header: 'Content-Range' })
-    ])
+    const list = await supabaseGet('points_records', { select: '*', filter: q, order: 'created_at.desc', limit: size, offset })
 
-    const count = Array.isArray(countResult) ? countResult.length : 0
-    res.json(success({ list: Array.isArray(list) ? list : [], total: count, page, size }))
+    res.json(success({ list: Array.isArray(list) ? list : [], total: Array.isArray(list) ? list.length : 0, page, size }))
   } catch (e) {
     res.status(500).json(error('查询积分记录失败'))
   }
@@ -623,7 +638,7 @@ app.get('/history/detail/:id', authMiddleware, async (req, res) => {
     res.json(success({
       ...task,
       images: task.result_images ? JSON.parse(task.result_images) : [],
-      task_ids: JSON.parse(task.task_ids || '[]')
+      task_ids: JSON.parse(task.duomi_task_ids || '[]') // schema 列: duomi_task_ids
     }))
   } catch (e) {
     res.status(500).json(error('查询详情失败'))
@@ -638,10 +653,14 @@ app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1)
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
     const offset = (page - 1) * size
+    const keyword = req.query.keyword || ''
 
-    // 简化查询：不用嵌套关联（避免FK不存在时报错）
+    let filter = {}
+    if (keyword) filter['username'] = `ilike.%${keyword}%`
+
     const list = await supabaseGet('users', {
       select: '*',
+      filter,
       order: 'created_at.desc',
       limit: size,
       offset
@@ -663,7 +682,7 @@ app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
       return res.status(400).json(error('用户名和密码不能为空'))
     }
 
-    // 检查是否已存在
+    // 检查是否已存在（查 users 表）
     const existing = await supabaseGet('users', {
       select: 'id',
       filter: { 'username': `eq.${username}` },
@@ -673,23 +692,22 @@ app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
       return res.status(400).json(error('用户名已存在'))
     }
 
-    // 同时在 admin_users 和 users 表创建
-    // 注意：admin_users 只有 id,username,password_hash,created_at 四列
+    // 同时在 admin_users 和 users 表创建（严格按 schema 列）
     const hashedPassword = hashPassword(password)
 
+    // admin_users: id, username, password_hash, created_at（仅4列）
     const adminUser = await supabasePost('admin_users', {
       username,
       password_hash: hashedPassword
     })
 
-    const adminUserId = Array.isArray(adminUser) ? adminUser[0]?.id : adminUser?.id
-
-    // users 表：id,username,password_hash,points_balance,status,created_at,last_login_at
+    // users: id, username, password_hash, points_balance, status, created_at, last_login_at
     const user = await supabasePost('users', {
       username,
       password_hash: hashedPassword,
       points_balance: Number(points),
-      status: 1
+      status: 1,
+      last_login_at: null
     })
 
     const userId = Array.isArray(user) ? user[0]?.id : user?.id
@@ -708,31 +726,28 @@ app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) =
     const adjustAmount = Number(amount)
     if (!adjustAmount) return res.status(400).json(error('请输入调整金额'))
 
-    // 先查当前用户和余额
+    // 查 users 表（列: points_balance）
     const userList = await supabaseGet('users', {
-      select: '*',
+      select: 'id,username,points_balance',
       filter: { 'id': `eq.${targetId}` },
       single: true
     })
     const user = Array.isArray(userList) ? userList[0] : userList
     if (!user) return res.status(404).json(error('用户不存在'))
 
-    // 兼容多种可能的列名
-    const currentBalance = Number(user.points ?? user.points_balance ?? user.points_balance ?? 0)
+    const currentBalance = Number(user.points_balance ?? 0)
     const newBalance = currentBalance + adjustAmount
     if (newBalance < 0) return res.status(400).json(error('调整后余额不能为负数'))
 
-    // 更新余额：自动检测实际存在的列名
-    const balanceCol = user.hasOwnProperty('points') ? 'points' : (user.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
-    await supabaseUpdate('users', targetId, { [balanceCol]: newBalance })
+    await supabaseUpdate('users', targetId, { points_balance: newBalance })
 
-    // 写流水记录
     try {
       await supabasePost('points_records', {
         user_id: targetId,
         amount: adjustAmount,
         balance_after: newBalance,
         type: 'admin_adjust',
+        related_task_id: null,
         remark: reason || remark || '管理员手动调整'
       })
     } catch {}
@@ -753,53 +768,33 @@ app.put('/admin/users/:id/password', authMiddleware, adminOnly, async (req, res)
       return res.status(400).json(error('密码至少6位'))
     }
 
-    // 查用户记录（同时尝试 users 和 admin_users 表）
-    let user = null
-    // 先查 admin_users（管理员和普通用户的认证信息都存这里）
-    user = await supabaseGet('admin_users', {
-      select: '*',
+    // 查 users 表获取 username（用于关联 admin_users）
+    const userRec = await supabaseGet('users', {
+      select: 'id,username',
       filter: { 'id': `eq.${targetId}` },
       single: true
     })
-    if (!user) {
-      // 再尝试直接按 id 查 users 表
-      user = await supabaseGet('users', {
-        select: '*',
-        filter: { 'id': `eq.${targetId}` },
-        single: true
-      })
-    }
+    const user = Array.isArray(userRec) ? userRec[0] : userRec
     if (!user) return res.status(404).json(error('用户不存在'))
 
-    // 如果从 admin_users 找到了，直接更新
-    if (user.id) {
-      await supabaseUpdate('admin_users', user.id, { password_hash: hashPassword(newPassword) })
-    } else {
-      // 从 users 表找到的，用 username 去 admin_users 更新
+    const hashedPassword = hashPassword(newPassword)
+
+    // 更新 users 表密码
+    await supabaseUpdate('users', targetId, { password_hash: hashedPassword })
+
+    // 用 username 查 admin_users 并更新密码（两张表通过 username 关联）
+    try {
       const adminList = await supabaseGet('admin_users', {
         select: 'id',
         filter: { 'username': `eq.${user.username}` },
         limit: 1
       })
       const adminRec = Array.isArray(adminList) ? adminList[0] : adminList
-      if (!adminRec) return res.status(404).json(error('找不到对应的管理员账号'))
-      await supabaseUpdate('admin_users', adminRec.id, { password_hash: hashPassword(newPassword) })
-    }
-
-    // 同步更新 users 表的密码（如果有这条记录）
-    try {
-      const userInUsers = await supabaseGet('users', {
-        select: 'id',
-        filter: { 'username': `eq.${user.username}` },
-        limit: 1
-      })
-      const u = Array.isArray(userInUsers) ? userInUsers[0] : userInUsers
-      if (u?.id) {
-        await supabaseUpdate('users', u.id, { password_hash: hashPassword(newPassword) })
+      if (adminRec?.id) {
+        await supabaseUpdate('admin_users', adminRec.id, { password_hash: hashedPassword })
       }
     } catch (e2) {
-      // users表更新失败不阻塞主流程
-      console.warn('Sync password to users table failed:', e2.message)
+      console.warn('Sync password to admin_users failed:', e2.message)
     }
 
     res.json(success(null, '密码重置成功'))
@@ -809,31 +804,14 @@ app.put('/admin/users/:id/password', authMiddleware, adminOnly, async (req, res)
   }
 })
 
-// 切换用户状态
+// 切换用户状态（只更新 users 表，admin_users 无 status 列）
 app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { status } = req.body
     const targetId = req.params.id
 
-    // 更新 users 表状态
+    // users 表 status 是 SMALLINT (1=活跃, 0=禁用)
     await supabaseUpdate('users', targetId, { status: Number(status) })
-
-    // 尝试同步更新 admin_users 表（通过 username 查找）
-    try {
-      const userList = await supabaseGet('users', {
-        select: 'username',
-        filter: { 'id': `eq.${targetId}` },
-        single: true
-      })
-      const user = Array.isArray(userList) ? userList[0] : userList
-      if (user?.username) {
-        // admin_users表无status列，跳过同步
-        console.log(`Status sync skipped: admin_users has no 'status' column`)
-      }
-    } catch (e2) {
-      // admin_users 同步失败不阻塞
-      console.warn('Sync status to admin_users failed:', e2.message)
-    }
 
     res.json(success(null, '状态更新成功'))
   } catch (e) {
@@ -842,54 +820,43 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
   }
 })
 
-// 定价管理（返回前端 Pricing.vue 期望的格式）
+// 定价管理 — 管理端 GET（返回前端 Pricing.vue 期望的格式）
 app.get('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
-  // 默认定价数据（数据库不可用时使用）
   const defaultData = {
     pricing: [
       { id: 'new-image2-standard', model_name: 'image2', quality: 'standard', points_per_image: 2 },
       { id: 'new-image2-hd', model_name: 'image2', quality: 'hd', points_per_image: 4 },
       { id: 'new-banana-standard', model_name: 'banana', quality: 'standard', points_per_image: 2 },
-      { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 },
-      { id: 'new-seedream-standard', model_name: 'seedream', quality: 'standard', points_per_image: 2 },
-      { id: 'new-seedream-hd', model_name: 'seedream', quality: 'hd', points_per_image: 4 }
+      { id: 'new-banana-hd', model_name: 'banana', quality: 'hd', points_per_image: 4 }
     ],
     i2i_extra: 1
   }
 
   try {
-    const list = await supabaseGet('pricing_config', { select: '*', order: 'id.asc' })
+    // 实际表名: points_config
+    const list = await supabaseGet('points_config', { select: '*', order: 'id.asc' })
     const items = Array.isArray(list) ? list : (list ? [list] : [])
 
     if (items.length === 0) {
       return res.json(success(defaultData))
     }
 
-    // 转换数据库格式为前端期望格式：{ pricing: [...], i2iExtra }
-    const pricing = []
-    let i2iExtra = 1
-    for (const item of items) {
-      const modelName = item.model || item.model_name || 'image2'
-      const quality = item.quality || (item.hd_only ? 'hd' : 'standard')
-      pricing.push({
-        id: item.id,
-        model_name: modelName,
-        quality,
-        points_per_image: Number(item.points) || Number(item.points_per_image) || 2
-      })
-      if (item.i2i_extra !== undefined) i2iExtra = Number(item.i2i_extra)
-    }
-    res.json(success({ pricing, i2i_extra }))
+    const pricing = items.map(item => ({
+      id: item.id,
+      model_name: item.model_name,     // schema 列: model_name
+      quality: item.quality,            // schema 列: quality
+      points_per_image: Number(item.points_per_image) // schema 列: points_per_image
+    }))
+    res.json(success({ pricing, i2i_extra: 1 }))
   } catch (e) {
     console.error('Admin pricing error:', e.message)
     res.json(success(defaultData))
   }
 })
 
-// 批量保存定价（前端调用 PUT /admin/pricing，无 :id）
+// 批量保存定价（PUT /admin/pricing，无 :id）
 app.put('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   try {
-    // 前端发送格式：{ pricing: [{ id, pointsPerImage }] } 或直接数组
     const items = req.body.pricing || req.body
     const updates = Array.isArray(items) ? items : [items]
 
@@ -897,20 +864,22 @@ app.put('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
       const { id, pointsPerImage } = item
       if (!id) continue
       const pts = Number(pointsPerImage)
-      // new- 前缀表示是新记录需要创建
+
       if (String(id).startsWith('new-')) {
+        // 新记录 → 插入 points_config（列: model_name, quality, points_per_image）
+        const modelName = id.replace('new-', '').replace('-standard', '').replace('-hd', '')
+        const quality = id.includes('-hd') ? 'hd' : 'standard'
         try {
-          await supabasePost('pricing_config', {
-            model: id.replace('new-', '').replace('-standard', '').replace('-hd', ''),
-            quality: id.includes('-hd') ? 'hd' : 'standard',
-            points: pts,
-            status: 'active'
+          await supabasePost('points_config', {
+            model_name: modelName,       // schema 列: model_name
+            quality: quality,            // schema 列: quality
+            points_per_image: pts        // schema 列: points_per_image
           })
         } catch {}
       } else {
-        // 更新已有记录
+        // 更新已有记录（列: points_per_image）
         try {
-          await supabaseUpdate('pricing_config', id, { points: pts })
+          await supabaseUpdate('points_config', id, { points_per_image: pts })
         } catch {}
       }
     }
@@ -922,10 +891,14 @@ app.put('/admin/pricing', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
+// 单条定价更新
 app.put('/admin/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { points, description, status } = req.body
-    await supabaseUpdate('pricing_config', req.params.id, { points, description, status })
+    const { points_per_image, description } = req.body
+    // points_config 列: model_name, quality, points_per_image（无 description/status）
+    const updateData = {}
+    if (points_per_image !== undefined) updateData.points_per_image = Number(points_per_image)
+    await supabaseUpdate('points_config', req.params.id, updateData)
     res.json(success(null, '更新成功'))
   } catch (e) {
     res.status(500).json(error('更新定价失败'))
@@ -957,30 +930,41 @@ app.get('/admin/records', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-// 系统设置
+// 系统设置 GET
 app.get('/admin/settings', authMiddleware, adminOnly, async (req, res) => {
   try {
+    // system_config 列: id, config_key, config_value, updated_at
     const list = await supabaseGet('system_config', { select: '*' })
-    res.json(success({ settings: Array.isArray(list) ? list : [] }))
+    // 转换为前端可能期望的 { key: value } 格式
+    const settings = {}
+    const items = Array.isArray(list) ? list : (list ? [list] : [])
+    for (const item of items) {
+      settings[item.config_key] = item.config_value
+    }
+    res.json(success({ settings, items }))
   } catch (e) {
-    res.status(500).json(error('获取设置失败'))
+    res.json(success({ settings: {}, items: [] }))
   }
 })
 
+// 系统设置 PUT（单条更新）
 app.put('/admin/settings/:key', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { value } = req.body
+    const configKey = req.params.key
+    // system_config 列: config_key, config_value, updated_at
+
     // 先查是否存在
     const existing = await supabaseGet('system_config', {
-      select: 'id,key,value',
-      filter: { 'key': `eq.${req.params.key}` },
+      select: 'id,config_key,config_value',
+      filter: { 'config_key': `eq.${configKey}` },
       single: true
     })
     const item = Array.isArray(existing) ? existing[0] : existing
     if (item) {
-      await supabaseUpdate('system_config', item.id, { value: value ?? '' })
+      await supabaseUpdate('system_config', item.id, { config_value: value ?? '', updated_at: new Date().toISOString() })
     } else {
-      await supabasePost('system_config', { key: req.params.key, value: value ?? '' })
+      await supabasePost('system_config', { config_key: configKey, config_value: value ?? '' })
     }
     res.json(success(null, '更新成功'))
   } catch (e) {
@@ -995,7 +979,7 @@ app.put('/admin/settings/password', authMiddleware, adminOnly, async (req, res) 
     if (!oldPassword || !newPassword || newPassword.length < 6) {
       return res.status(400).json(error('密码至少6位'))
     }
-    // 验证旧密码
+
     const adminList = await supabaseGet('admin_users', {
       select: '*',
       filter: { 'id': `eq.${req.user.id}` },
@@ -1003,11 +987,26 @@ app.put('/admin/settings/password', authMiddleware, adminOnly, async (req, res) 
     })
     const adminUser = Array.isArray(adminList) ? adminList[0] : adminList
     if (!adminUser) return res.status(404).json(error('用户不存在'))
-    if (adminUser.password_hash !== hashPassword(oldPassword)) {
+
+    if (!await verifyPassword(oldPassword, adminUser.password_hash)) {
       return res.status(400).json(error('原密码错误'))
     }
-    // 更新密码
+
     await supabaseUpdate('admin_users', req.user.id, { password_hash: hashPassword(newPassword) })
+
+    // 同步更新 users 表密码
+    try {
+      const uRec = await supabaseGet('users', {
+        select: 'id',
+        filter: { 'username': `eq.${adminUser.username}` },
+        limit: 1
+      })
+      const u = Array.isArray(uRec) ? uRec[0] : uRec
+      if (u?.id) {
+        await supabaseUpdate('users', u.id, { password_hash: hashPassword(newPassword) })
+      }
+    } catch {}
+
     res.json(success(null, '密码修改成功'))
   } catch (e) {
     console.error('Change password error:', e.message)
