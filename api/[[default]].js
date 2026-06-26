@@ -349,12 +349,13 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
         const body = {
           model: 'gpt-image-2',
           prompt: prompt,
-          image_size: size || '1024x1024',
           n: 1
         }
-        // 图生图模式：附加参考图
+        // size 支持 "1024x1024" 或比例格式 "16:9" 等
+        if (size) body.size = size
+        // 图生图：参考图必须是数组格式 ["url"]
         if (refImageUrl) {
-          body.image = refImageUrl
+          body.image = [refImageUrl]
         }
         requestBody = JSON.stringify(body)
         contentType = 'application/json'
@@ -380,7 +381,9 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
       })
 
       const result = await resp.json()
-      if (!resp.ok || !result.task_id) {
+      console.log('Duomi API response:', JSON.stringify({ status: resp.status, body: result }))
+      const taskId = result.task_id || result.id
+      if (!resp.ok || !taskId) {
         // 退还积分
         try {
           const uRec2 = await supabaseGet('users', {
@@ -394,7 +397,7 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
         } catch {}
         return res.status(502).json(error(result.message || `调用AI接口失败: ${resp.status}`))
       }
-      taskIds.push(String(result.task_id))
+      taskIds.push(String(taskId))
     }
 
     // 写入 image_tasks 表（列名严格对齐 schema）
@@ -446,10 +449,11 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
         const data = await resp.json()
         const state = data.state
 
+        // 多米状态: pending → running → succeeded / error
         if (state === 'succeeded') {
           results.push({ task_id: tid, status: 'success', image_url: data.data?.images?.[0]?.url || null })
-        } else if (state === 'failed') {
-          results.push({ task_id: tid, status: 'failed', error: data.error || '生成失败' })
+        } else if (state === 'error' || state === 'failed') {
+          results.push({ task_id: tid, status: 'failed', error: data.error || data.message || '生成失败' })
         } else {
           results.push({ task_id: tid, status: 'pending' })
         }
