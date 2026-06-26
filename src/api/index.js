@@ -27,11 +27,17 @@ request.interceptors.response.use(
   },
   error => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      ElMessage.error('登录已过期，请重新登录')
-      setTimeout(() => {
-        window.location.href = '/login'
-      }, 1500)
+      const msg = error.response?.data?.message || ''
+      // 登录接口返回401时显示具体原因（用户名/密码错误等）
+      if (error.config?.url?.includes('/auth/login')) {
+        ElMessage.error(msg || '用户名或密码错误')
+      } else {
+        localStorage.removeItem('token')
+        ElMessage.error(msg || '登录已过期，请重新登录')
+        setTimeout(() => {
+          window.location.href = '/login'
+        }, 1500)
+      }
     } else {
       const msg = error.response?.data?.message || error.message || '网络错误'
       ElMessage.error(msg)
