@@ -17,7 +17,7 @@ export const adminApi = {
 
   // 全局记录
   getPointsFlow: (params) => request.get('/admin/records', { params }),
-  getImageRecords: (params) => request.get('/history/list', { params }),
+  getImageRecords: (params) => request.get('/admin/records/images', { params }),
   getImageRecordDetail: (id) => request.get(`/history/detail/${id}`),
 
   // 系统设置

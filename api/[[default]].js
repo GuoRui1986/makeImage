@@ -967,6 +967,61 @@ app.get('/admin/records', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
+// 全局生图记录（管理员查看所有用户的图片生成记录）
+app.get('/admin/records/images', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1)
+    const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 20))
+    const offset = (page - 1) * size
+
+    const filter = {}
+    if (req.query.modelName) filter['model_name'] = `eq.${req.query.modelName}`
+    if (req.query.status) filter['status'] = `eq.${req.query.status}`
+    if (req.query.startDate) filter['created_at'] = `gte.${req.query.startDate}T00:00:00`
+    if (req.query.endDate) {
+      filter['created_at'] = (filter['created_at'] ? filter['created_and'] : '') + `lte.${req.query.endDate}T23:59:59`
+    }
+
+    // 查询所有生图记录
+    const list = await supabaseGet('image_tasks', {
+      select: '*',
+      filter,
+      order: 'created_at.desc',
+      limit: size,
+      offset
+    })
+    const tasks = Array.isArray(list) ? list : []
+
+    // 批量查用户名映射
+    const userIds = [...new Set(tasks.map(t => t.user_id).filter(Boolean))]
+    let userMap = {}
+    if (userIds.length > 0) {
+      try {
+        const usersList = await supabaseGet('users', {
+          select: 'id,username',
+          filter: { 'id': `in.(${userIds.join(',')})` },
+          limit: userIds.length
+        })
+        const users = Array.isArray(usersList) ? usersList : []
+        for (const u of users) { userMap[u.id] = u.username }
+      } catch {}
+    }
+
+    // 组装结果：附加用户名字段
+    const records = tasks.map(t => ({
+      ...t,
+      username: userMap[t.user_id] || `用户${t.user_id}`,
+      image_count: t.image_count || 1,
+      points_cost: t.points_cost || 0,
+    }))
+
+    res.json(success({ list: records, total: tasks.length >= size ? -1 : offset + tasks.length, page, size }))
+  } catch (e) {
+    console.error('Admin image records error:', e.message)
+    res.status(500).json(error('获取全局生图记录失败'))
+  }
+})
+
 // 系统设置 GET
 app.get('/admin/settings', authMiddleware, adminOnly, async (req, res) => {
   try {
