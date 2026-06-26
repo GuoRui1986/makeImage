@@ -54,7 +54,15 @@ const loadData = async () => {
   loading.value = true
   try {
     const res = await pointsApi.getRecords(page.value)
-    records.value = res.data.records
+    // 后端返回 list，前端兼容 list/records 两种 key
+    const rawList = res.data.list || res.data.records || []
+    // 将 snake_case 字段转换为前端显示需要的格式
+    records.value = rawList.map(item => ({
+      ...item,
+      createdAt: item.created_at || item.createdAt,
+      typeLabel: item.type === 'admin_adjust' ? '管理员调整' : (item.type === 'generate_deduct' ? '生图扣除' : (item.type === 'fail_refund' ? '失败返还' : item.type)),
+      balanceAfter: item.balance_after || item.balanceAfter,
+    }))
     total.value = res.data.total
   } finally {
     loading.value = false

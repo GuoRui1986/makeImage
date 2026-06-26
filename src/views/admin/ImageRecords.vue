@@ -131,7 +131,14 @@ const loadData = async () => {
       endDate: dateRange.value?.[1] || undefined
     }
     const res = await adminApi.getImageRecords(params)
-    records.value = res.data.records
+    // 后端返回 list，前端兼容 list/records 两种 key
+    const rawList = res.data.list || res.data.records || []
+    records.value = rawList.map(item => ({
+      ...item,
+      username: item.username || '用户',
+      image_count: item.count || item.image_count || item.imageCount || 1,
+      points_cost: item.points_cost || item.pointsCost || 0,
+    }))
     total.value = res.data.total
   } finally {
     loading.value = false
@@ -148,11 +155,17 @@ const resetFilters = () => {
 }
 
 const viewDetail = async (id) => {
-  const res = await adminApi.getImageRecordDetail(id)
-  detail.value = res.data
-  detailImages.value = res.data.result_images || []
-  showDetail.value = true
-}
+    const res = await adminApi.getImageRecordDetail(id)
+    const raw = res.data
+    // 后端返回 snake_case，转 camelCase 用于显示
+    detail.value = {
+      ...raw,
+      images: raw.images || (raw.result_images ? JSON.parse(raw.result_images) : []),
+      mode: raw.mode || 'txt2img',
+    }
+    detailImages.value = detail.value.images || []
+    showDetail.value = true
+  }
 
 onMounted(loadData)
 </script>

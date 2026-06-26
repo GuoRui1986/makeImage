@@ -82,10 +82,11 @@ const loadSettings = async () => {
 const saveApiConfig = async () => {
   savingApi.value = true
   try {
-    await adminApi.updateApiConfig({
-      duomiApiKey: apiConfig.duomiApiKey || undefined,
-      duomiBaseUrl: apiConfig.duomiBaseUrl
-    })
+    // 分别保存两个配置项
+    if (apiConfig.duomiApiKey) {
+      await adminApi.updateSettingByKey('duomi_api_key', apiConfig.duomiApiKey)
+    }
+    await adminApi.updateSettingByKey('duomi_base_url', apiConfig.duomiBaseUrl)
     ElMessage.success('API配置已保存')
     apiConfig.duomiApiKey = ''
     loadSettings()

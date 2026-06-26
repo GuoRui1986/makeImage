@@ -74,7 +74,28 @@ const loadData = async () => {
   loading.value = true
   try {
     const res = await historyApi.getList(page.value)
-    records.value = res.data.records
+    // 后端返回 list，前端兼容 list/records 两种 key
+    const rawList = res.data.list || res.data.records || []
+    // 将 snake_case 字段转换为前端 camelCase
+    records.value = rawList.map(item => {
+      // 解析第一张图片
+      let firstImage = null
+      if (item.result_images) {
+        try {
+          const imgs = JSON.parse(item.result_images)
+          firstImage = imgs[0]
+        } catch {}
+      }
+      return {
+        ...item,
+        modelName: item.model || item.modelName || item.model_name,
+        mode: item.mode || 'txt2img',
+        imageCount: item.count || item.imageCount || item.image_count || 1,
+        pointsCost: item.points_cost || item.pointsCost || 0,
+        createdAt: item.created_at || item.createdAt,
+        firstImage
+      }
+    })
     total.value = res.data.total
   } finally {
     loading.value = false

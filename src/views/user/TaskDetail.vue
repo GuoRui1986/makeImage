@@ -86,7 +86,23 @@ const loadData = async () => {
   loading.value = true
   try {
     const res = await historyApi.getDetail(route.params.id)
-    task.value = res.data
+    const raw = res.data
+    // 后端返回 snake_case 字段，前端转 camelCase
+    task.value = {
+      ...raw,
+      modelName: raw.model || raw.modelName || raw.model_name,
+      mode: raw.mode || 'txt2img',
+      aspectRatio: raw.size || raw.aspectRatio || raw.aspect_ratio,
+      quality: raw.quality || 'standard',
+      imageCount: raw.count || raw.imageCount || raw.image_count || 1,
+      pointsCost: raw.points_cost || raw.pointsCost || 0,
+      createdAt: raw.created_at || raw.createdAt,
+      finishedAt: raw.completed_at || raw.finishedAt || raw.finished_at,
+      referenceImage: raw.reference_image || raw.referenceImageUrl || raw.referenceImageUrl,
+      resultImages: raw.images || raw.result_images || (raw.resultImages ? raw.resultImages : []),
+      failReason: raw.fail_reason || raw.failReason,
+      status: raw.status
+    }
   } finally {
     loading.value = false
   }

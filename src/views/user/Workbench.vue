@@ -250,6 +250,7 @@ const handleRefUpload = async (options) => {
       const base64 = reader.result.split(',')[1]
       try {
         const res = await taskApi.uploadRef({
+          image: 'data:image/' + (file.type.includes('png') ? 'png' : 'jpeg') + ';base64,' + base64,
           imageBase64: base64,
           filename: file.name
         })
@@ -293,16 +294,19 @@ const handleGenerate = async () => {
 
   try {
     const res = await taskApi.create({
+      model: config.modelName,
       modelName: config.modelName,
-      mode: config.mode,
       prompt: config.prompt,
+      size: config.aspectRatio,
       aspectRatio: config.aspectRatio,
       quality: config.quality,
+      count: config.imageCount,
       imageCount: config.imageCount,
-      referenceImageUrl: config.referenceImageUrl || undefined
+      referenceImageUrl: config.referenceImageUrl || undefined,
+      refImageUrl: config.referenceImageUrl || undefined
     })
 
-    const taskId = res.data.taskId
+    const taskId = res.data.task_id || res.data.taskId
     progressText.value = '任务已提交...'
 
     // 开始轮询
@@ -321,29 +325,32 @@ const startPolling = (taskId) => {
     try {
       const res = await taskApi.getStatus(taskId)
       const data = res.data
+      // 后端返回 [{task_id, status, image_url/error}] 数组格式
+      const results = Array.isArray(data) ? data : (data.results || [data])
 
-      if (data.status === 'success') {
+      const successItems = results.filter(r => r.status === 'success')
+      const failedItems = results.filter(r => r.status === 'failed')
+      const pendingItems = results.filter(r => r.status === 'pending')
+
+      if (pendingItems.length === 0) {
         clearInterval(pollTimer.value)
         pollTimer.value = null
         generating.value = false
-        resultImages.value = data.resultImages || []
-        authStore.refreshPoints()
-        if (data.refundedPoints > 0) {
-          ElMessage.warning(`部分图片生成失败，已返还 ${data.refundedPoints.toFixed(2)} 积分`)
+
+        if (successItems.length > 0) {
+          resultImages.value = successItems.map(r => r.image_url || r.imageUrl).filter(Boolean)
+          ElMessage.success(`生成完成，成功 ${successItems.length} 张`)
         }
-        ElMessage.success(`生成完成，成功 ${data.successCount || resultImages.value.length} 张`)
-      } else if (data.status === 'failed') {
-        clearInterval(pollTimer.value)
-        pollTimer.value = null
-        generating.value = false
-        generateFailed.value = true
-        failReason.value = data.failReason || '生成失败'
-        authStore.refreshPoints()
-        if (data.refundedPoints > 0) {
-          ElMessage.info(`已返还 ${data.refundedPoints.toFixed(2)} 积分`)
+
+        if (failedItems.length > 0) {
+          generateFailed.value = successItems.length === 0
+          failReason.value = failedItems.map(r => r.error || r.failReason || '生成失败').join('; ')
+          ElMessage.error(`部分图片生成失败：${failReason.value}`)
         }
+
+        authStore.refreshPoints()
       } else {
-        progressText.value = `成功 ${data.successCount || 0} / 失败 ${data.failedCount || 0} / 等待 ${data.pendingCount || 0}`
+        progressText.value = `成功 ${successItems.length} / 失败 ${failedItems.length} / 等待 ${pendingItems.length}`
       }
     } catch {
       // 轮询出错不中断，继续重试

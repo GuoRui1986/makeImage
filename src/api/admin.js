@@ -23,5 +23,6 @@ export const adminApi = {
   // 系统设置
   getSettings: () => request.get('/admin/settings'),
   updateApiConfig: (data) => request.put('/admin/settings/api', data),
-  updatePassword: (oldPassword, newPassword) => request.put('/admin/settings/password', { oldPassword, newPassword })
+  updatePassword: (oldPassword, newPassword) => request.put('/admin/settings/password', { oldPassword, newPassword }),
+  updateSettingByKey: (key, value) => request.put(`/admin/settings/${key}`, { value })
 }

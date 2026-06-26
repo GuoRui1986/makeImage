@@ -37,18 +37,18 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="createdAt" label="创建时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+        <el-table-column label="创建时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.created_at || row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column prop="lastLoginAt" label="最后登录" width="180">
-          <template #default="{ row }">{{ formatTime(row.lastLoginAt) }}</template>
+        <el-table-column label="最后登录" width="180">
+          <template #default="{ row }">{{ formatTime(row.last_login || row.lastLoginAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="openPointsDialog(row)">调整积分</el-button>
             <el-button size="small" @click="openPasswordDialog(row)">重置密码</el-button>
-            <el-button size="small" :type="row.status === 1 ? 'danger' : 'success'" plain @click="toggleStatus(row)">
-              {{ row.status === 1 ? '禁用' : '启用' }}
+            <el-button size="small" :type="isActive(row.status) ? 'danger' : 'success'" plain @click="toggleStatus(row)">
+              {{ isActive(row.status) ? '禁用' : '启用' }}
             </el-button>
           </template>
         </el-table-column>
@@ -149,6 +149,7 @@ const createRules = {
 const pointsForm = reactive({ amount: 0, remark: '' })
 
 const formatTime = (t) => t ? new Date(t).toLocaleString('zh-CN') : '-'
+const isActive = (status) => status === 1 || status === 'active'
 
 const loadData = async () => {
   loading.value = true
@@ -226,11 +227,11 @@ const handleResetPassword = async () => {
 const toggleStatus = async (user) => {
   try {
     await ElMessageBox.confirm(
-      `确认${user.status === 1 ? '禁用' : '启用'}用户「${user.username}」？`,
+      `确认${isActive(user.status) ? '禁用' : '启用'}用户「${user.username}」？`,
       '确认操作',
       { type: 'warning' }
     )
-    await adminApi.toggleStatus(user.id, user.status === 1 ? 0 : 1)
+    await adminApi.toggleStatus(user.id, isActive(user.status) ? 0 : 1)
     ElMessage.success('操作成功')
     loadData()
   } catch {

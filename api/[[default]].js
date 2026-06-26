@@ -201,8 +201,31 @@ app.post('/auth/login', async (req, res) => {
 })
 
 // 获取当前用户信息
-app.get('/auth/me', authMiddleware, (req, res) => {
-  res.json(success(req.user))
+app.get('/auth/me', authMiddleware, async (req, res) => {
+  try {
+    // 从 JWT payload 中获取基本信息
+    const userInfo = {
+      id: req.user.id,
+      username: req.user.username,
+      role: req.user.role
+    }
+    // 从 users 表获取积分余额
+    try {
+      const userRec = await supabaseGet('users', {
+        select: '*',
+        filter: { 'id': `eq.${req.user.id}` },
+        single: true
+      })
+      const user = Array.isArray(userRec) ? userRec[0] : userRec
+      if (user) {
+        userInfo.nickname = user.nickname || user.username
+        userInfo.pointsBalance = Number(user.points ?? user.points_balance ?? 0)
+      }
+    } catch {}
+    res.json(success(userInfo))
+  } catch (e) {
+    res.json(success(req.user))
+  }
 })
 
 // ====== 路由: 任务 ======
@@ -210,8 +233,14 @@ app.get('/auth/me', authMiddleware, (req, res) => {
 // 创建生图任务
 app.post('/tasks/create', authMiddleware, async (req, res) => {
   try {
-    const { model, prompt, size, count = 1, refImageUrl, n } = req.body
-    const numImages = parseInt(n) || parseInt(count) || 1
+    const body = req.body
+    // 兼容前端两种字段命名格式（camelCase 和 snake_case）
+    const model = body.model || body.modelName
+    const prompt = body.prompt
+    const size = body.size || body.aspectRatio
+    const refImageUrl = body.refImageUrl || body.referenceImageUrl
+    const count = body.count || body.imageCount || body.n || 1
+    const numImages = parseInt(count) || 1
     if (!model || !prompt) return res.status(400).json(error('缺少必要参数'))
 
     // 查定价（带默认值兜底）
@@ -430,7 +459,8 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
 // 上传参考图到 Supabase Storage
 app.post('/tasks/upload-ref', authMiddleware, async (req, res) => {
   try {
-    const base64 = req.body.image
+    // 兼容前端两种字段名: image 和 imageBase64
+    const base64 = req.body.image || req.body.imageBase64
     if (!base64) return res.status(400).json(error('没有收到图片数据'))
 
     const base64Data = base64.replace(/^data:image\/\w+;base64,/, '')
@@ -922,6 +952,33 @@ app.put('/admin/settings/:key', authMiddleware, adminOnly, async (req, res) => {
     res.json(success(null, '更新成功'))
   } catch (e) {
     res.status(500).json(error('更新设置失败'))
+  }
+})
+
+// 修改管理员密码
+app.put('/admin/settings/password', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body
+    if (!oldPassword || !newPassword || newPassword.length < 6) {
+      return res.status(400).json(error('密码至少6位'))
+    }
+    // 验证旧密码
+    const adminList = await supabaseGet('admin_users', {
+      select: '*',
+      filter: { 'id': `eq.${req.user.id}` },
+      single: true
+    })
+    const adminUser = Array.isArray(adminList) ? adminList[0] : adminList
+    if (!adminUser) return res.status(404).json(error('用户不存在'))
+    if (adminUser.password_hash !== hashPassword(oldPassword)) {
+      return res.status(400).json(error('原密码错误'))
+    }
+    // 更新密码
+    await supabaseUpdate('admin_users', req.user.id, { password_hash: hashPassword(newPassword) })
+    res.json(success(null, '密码修改成功'))
+  } catch (e) {
+    console.error('Change password error:', e.message)
+    res.status(500).json(error('修改密码失败'))
   }
 })
 
