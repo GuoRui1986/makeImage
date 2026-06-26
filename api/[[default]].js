@@ -506,8 +506,9 @@ app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
     const size = Math.min(20, Math.max(1, parseInt(req.query.size) || 10))
     const offset = (page - 1) * size
 
+    // 简化查询：不用嵌套关联（避免FK不存在时报错）
     const list = await supabaseGet('users', {
-      select: '*,admin_user_id(username,nickname)',
+      select: '*',
       order: 'created_at.desc',
       limit: size,
       offset
@@ -515,6 +516,7 @@ app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
 
     res.json(success({ list: Array.isArray(list) ? list : [], total: 0, page, size }))
   } catch (e) {
+    console.error('Get users error:', e.message)
     res.status(500).json(error('获取用户列表失败'))
   }
 })
@@ -522,7 +524,8 @@ app.get('/admin/users', authMiddleware, adminOnly, async (req, res) => {
 // 创建用户
 app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { username, password, points = 100 } = req.body
+    const { username, password, points: rawPoints, initialPoints } = req.body
+    const points = Number(rawPoints ?? initialPoints ?? 100)
     if (!username || !password) {
       return res.status(400).json(error('用户名和密码不能为空'))
     }

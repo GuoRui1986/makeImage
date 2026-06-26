@@ -152,8 +152,8 @@ const loadData = async () => {
   loading.value = true
   try {
     const res = await adminApi.getUsers({ page: page.value, keyword: keyword.value })
-    users.value = res.data.users
-    total.value = res.data.total
+    users.value = res.data.list || []
+    total.value = res.data.total || 0
   } finally {
     loading.value = false
   }
