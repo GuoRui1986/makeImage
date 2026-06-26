@@ -6,6 +6,7 @@
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import crypto from 'node:crypto'
+import bcrypt from 'bcryptjs'
 
 // ====== 配置（适配 IGA Pages 环境变量） ======
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''
@@ -149,7 +150,19 @@ app.post('/auth/login', async (req, res) => {
     if (!users) return res.status(401).json(error('用户名或密码错误'))
     const user = Array.isArray(users) ? users[0] : users
 
-    if (user.password_hash !== hashPassword(password)) {
+    // 兼容两种密码哈希格式：SHA256（新用户）和 bcrypt（初始数据/旧数据）
+    let passwordOk = false
+    if (user.password_hash === hashPassword(password)) {
+      passwordOk = true
+    } else if (user.password_hash.startsWith('$2a$') || user.password_hash.startsWith('$2b$')) {
+      // bcrypt 格式，用 bcryptjs 验证
+      try {
+        passwordOk = await bcrypt.compare(password, user.password_hash)
+      } catch (bcryptErr) {
+        console.warn('bcrypt compare error:', bcryptErr.message)
+      }
+    }
+    if (!passwordOk) {
       return res.status(401).json(error('用户名或密码错误'))
     }
 
@@ -750,18 +763,29 @@ app.put('/admin/users/:id/password', authMiddleware, adminOnly, async (req, res)
       return res.status(400).json(error('密码至少6位'))
     }
 
-    // 查用户对应的 admin_users 记录
-    const userList = await supabaseGet('users', {
-      select: '*,admin_user_id',
+    // 查用户记录（同时尝试 users 和 admin_users 表）
+    let user = null
+    // 先查 admin_users（管理员和普通用户的认证信息都存这里）
+    user = await supabaseGet('admin_users', {
+      select: '*',
       filter: { 'id': `eq.${targetId}` },
       single: true
     })
-    const user = Array.isArray(userList) ? userList[0] : userList
+    if (!user) {
+      // 再尝试直接按 id 查 users 表
+      user = await supabaseGet('users', {
+        select: '*',
+        filter: { 'id': `eq.${targetId}` },
+        single: true
+      })
+    }
     if (!user) return res.status(404).json(error('用户不存在'))
 
-    const adminUserId = user.admin_user_id
-    if (!adminUserId) {
-      // 没有 admin_user_id，尝试直接用 username 去 admin_users 查
+    // 如果从 admin_users 找到了，直接更新
+    if (user.id) {
+      await supabaseUpdate('admin_users', user.id, { password_hash: hashPassword(newPassword) })
+    } else {
+      // 从 users 表找到的，用 username 去 admin_users 更新
       const adminList = await supabaseGet('admin_users', {
         select: 'id',
         filter: { 'username': `eq.${user.username}` },
@@ -770,8 +794,22 @@ app.put('/admin/users/:id/password', authMiddleware, adminOnly, async (req, res)
       const adminRec = Array.isArray(adminList) ? adminList[0] : adminList
       if (!adminRec) return res.status(404).json(error('找不到对应的管理员账号'))
       await supabaseUpdate('admin_users', adminRec.id, { password_hash: hashPassword(newPassword) })
-    } else {
-      await supabaseUpdate('admin_users', adminUserId, { password_hash: hashPassword(newPassword) })
+    }
+
+    // 同步更新 users 表的密码（如果有这条记录）
+    try {
+      const userInUsers = await supabaseGet('users', {
+        select: 'id',
+        filter: { 'username': `eq.${user.username}` },
+        limit: 1
+      })
+      const u = Array.isArray(userInUsers) ? userInUsers[0] : userInUsers
+      if (u?.id) {
+        await supabaseUpdate('users', u.id, { password_hash: hashPassword(newPassword) })
+      }
+    } catch (e2) {
+      // users表更新失败不阻塞主流程
+      console.warn('Sync password to users table failed:', e2.message)
     }
 
     res.json(success(null, '密码重置成功'))
@@ -787,19 +825,31 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
     const { status } = req.body
     const targetId = req.params.id
 
-    // 同时更新 users 和 admin_users 的状态
-    const userList = await supabaseGet('users', {
-      select: '*,admin_user_id',
-      filter: { 'id': `eq.${targetId}` },
-      single: true
-    })
-    const user = Array.isArray(userList) ? userList[0] : userList
-    if (!user) return res.status(404).json(error('用户不存在'))
-
+    // 更新 users 表状态
     await supabaseUpdate('users', targetId, { status: Number(status) })
 
-    if (user.admin_user_id) {
-      try { await supabaseUpdate('admin_users', user.admin_user_id, { status: Number(status) === 1 ? 'active' : 'disabled' }) } catch {}
+    // 尝试同步更新 admin_users 表（通过 username 查找）
+    try {
+      const userList = await supabaseGet('users', {
+        select: 'username',
+        filter: { 'id': `eq.${targetId}` },
+        single: true
+      })
+      const user = Array.isArray(userList) ? userList[0] : userList
+      if (user?.username) {
+        const adminList = await supabaseGet('admin_users', {
+          select: 'id',
+          filter: { 'username': `eq.${user.username}` },
+          limit: 1
+        })
+        const adminRec = Array.isArray(adminList) ? adminList[0] : adminList
+        if (adminRec?.id) {
+          await supabaseUpdate('admin_users', adminRec.id, { status: Number(status) === 1 ? 'active' : 'disabled' })
+        }
+      }
+    } catch (e2) {
+      // admin_users 同步失败不阻塞
+      console.warn('Sync status to admin_users failed:', e2.message)
     }
 
     res.json(success(null, '状态更新成功'))
