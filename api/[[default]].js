@@ -280,6 +280,7 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
     const model = body.model || body.modelName
     const prompt = body.prompt
     const size = body.size || body.aspectRatio
+    const body_quality = body.quality || 'standard'  // 前端传 quality: 'standard'/'hd'
     const refImageUrl = body.refImageUrl || body.referenceImageUrl
     const count = body.count || body.imageCount || body.n || 1
     const numImages = parseInt(count) || 1
@@ -340,33 +341,55 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
     const duomiBaseUrl = 'https://duomiapi.com'
     const taskIds = []
 
+    // 尺寸映射（本地版 server/services/image2.js 的逻辑）
+    const IMAGE2_SIZE_MAP = { '1:1': '1024x1024', '3:4': '768x1024', '4:3': '1024x768', '9:16': '576x1024', '16:9': '1024x576' }
+    const IMAGE2_QUALITY_MAP = { standard: 'low', hd: 'high' }
+    const BANANA_QUALITY_MAP = { standard: '1K', hd: '2K' }
+
     for (let i = 0; i < numImages; i++) {
-      let apiPath, requestBody, contentType
+      let apiPath, requestBody, contentType, authHeader
 
       if (model === 'image2') {
-        // 多米API: image2 必须带 ?async=true
+        // 完全对齐本地版 server/services/image2.js
         apiPath = '/v1/images/generations?async=true'
-        const body = {
+        const mappedSize = IMAGE2_SIZE_MAP[size] || size || '1024x1024'
+        const mappedQuality = IMAGE2_QUALITY_MAP[body_quality] || 'low'
+        const reqBody = {
           model: 'gpt-image-2',
           prompt: prompt,
-          n: 1
+          size: mappedSize,
+          quality: mappedQuality,
+          n: 1,
+          response_format: 'url'
         }
-        // size 支持 "1024x1024" 或比例格式 "16:9" 等
-        if (size) body.size = size
-        // 图生图：参考图必须是数组格式 ["url"]
+        // 图生图：参考图（本地版用字符串，官方文档也支持单张字符串）
         if (refImageUrl) {
-          body.image = [refImageUrl]
+          reqBody.image = refImageUrl
         }
-        requestBody = JSON.stringify(body)
+        requestBody = JSON.stringify(reqBody)
         contentType = 'application/json'
+        authHeader = `Bearer ${DUOMI_API_KEY}`
       } else if (model === 'banana' || model === 'nano-banana' || model === 'nano-banana-2') {
+        // 完全对齐本地版 server/services/banana.js
+        const BANANA_MODEL = 'gemini-3.1-flash-image-preview'
         apiPath = refImageUrl ? '/api/gemini/nano-banana-edit' : '/api/gemini/nano-banana'
-        const formData = new URLSearchParams()
-        formData.append('prompt', prompt)
-        if (refImageUrl) formData.append('image_url', refImageUrl)
-        if (size) formData.append('size', size)
-        requestBody = formData.toString()
-        contentType = 'application/x-www-form-urlencoded'
+        const mappedQuality = BANANA_QUALITY_MAP[body_quality] || '1K'
+        const reqBody = {
+          model: BANANA_MODEL,
+          prompt: prompt,
+          image_size: mappedQuality
+        }
+        if (!refImageUrl) {
+          reqBody.aspect_ratio = size || '1:1'
+        } else {
+          // 图生图：image_urls 是数组格式
+          reqBody.image_urls = [refImageUrl]
+          reqBody.aspect_ratio = size || 'auto'
+        }
+        requestBody = JSON.stringify(reqBody)
+        contentType = 'application/json'
+        // banana 不用 Bearer 前缀（本地版直接用 apiKey）
+        authHeader = DUOMI_API_KEY
       } else {
         return res.status(400).json(error('不支持的模型'))
       }
@@ -374,7 +397,7 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
       const resp = await fetch(`${duomiBaseUrl}${apiPath}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${DUOMI_API_KEY}`,
+          'Authorization': authHeader,
           'Content-Type': contentType
         },
         body: requestBody
@@ -382,8 +405,12 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
 
       const result = await resp.json()
       console.log('Duomi API response:', JSON.stringify({ status: resp.status, body: result }))
-      const taskId = result.task_id || result.id
-      if (!resp.ok || !taskId) {
+      // image2 返回 id, banana 返回 data.task_id — 兼容两种格式（对齐本地版）
+      const taskId = result.data?.id || result.id || result.data?.task_id || result.task_id
+      // banana 返回 {code: 200, data: {task_id}}, image2 返回 {id}
+      // 对齐本地版：banana 验证 code !== 200 也视为失败
+      const isBananaError = result.code !== undefined && result.code !== 200
+      if (!resp.ok || isBananaError || !taskId) {
         // 退还积分
         try {
           const uRec2 = await supabaseGet('users', {
