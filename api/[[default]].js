@@ -181,22 +181,20 @@ app.post('/auth/login', async (req, res) => {
     try {
       const existingUsers = await supabaseGet('users', {
         select: 'id',
-        filter: { 'admin_user_id': `eq.${user.id}` },
+        filter: { 'username': `eq.${user.username}` },
         limit: 1
       })
       if (Array.isArray(existingUsers) && existingUsers.length > 0) {
         await supabaseUpdate('users', existingUsers[0].id, {
-          last_login: new Date().toISOString()
+          last_login_at: new Date().toISOString()
         })
       } else {
         await supabasePost('users', {
-          admin_user_id: user.id,
           username: user.username,
-          nickname: user.nickname || user.username,
-          points: 10000,
-          role: userRole,
-          status: 'active',
-          last_login: new Date().toISOString()
+          password_hash: user.password_hash,
+          points_balance: 10000,
+          status: 1,
+          last_login_at: new Date().toISOString()
         })
       }
     } catch (e) {
@@ -676,30 +674,22 @@ app.post('/admin/users', authMiddleware, adminOnly, async (req, res) => {
     }
 
     // 同时在 admin_users 和 users 表创建
+    // 注意：admin_users 只有 id,username,password_hash,created_at 四列
     const hashedPassword = hashPassword(password)
-    const now = new Date().toISOString()
 
     const adminUser = await supabasePost('admin_users', {
       username,
-      nickname: username,
-      password_hash: hashedPassword,
-      role: 'user',
-      status: 'active',
-      created_at: now,
-      updated_at: now
+      password_hash: hashedPassword
     })
 
     const adminUserId = Array.isArray(adminUser) ? adminUser[0]?.id : adminUser?.id
 
+    // users 表：id,username,password_hash,points_balance,status,created_at,last_login_at
     const user = await supabasePost('users', {
-      admin_user_id: adminUserId,
       username,
-      nickname: username,
-      points: Number(points),
-      role: 'user',
-      status: 'active',
-      created_at: now,
-      last_login: null
+      password_hash: hashedPassword,
+      points_balance: Number(points),
+      status: 1
     })
 
     const userId = Array.isArray(user) ? user[0]?.id : user?.id
@@ -837,15 +827,8 @@ app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) =
       })
       const user = Array.isArray(userList) ? userList[0] : userList
       if (user?.username) {
-        const adminList = await supabaseGet('admin_users', {
-          select: 'id',
-          filter: { 'username': `eq.${user.username}` },
-          limit: 1
-        })
-        const adminRec = Array.isArray(adminList) ? adminList[0] : adminList
-        if (adminRec?.id) {
-          await supabaseUpdate('admin_users', adminRec.id, { status: Number(status) === 1 ? 'active' : 'disabled' })
-        }
+        // admin_users表无status列，跳过同步
+        console.log(`Status sync skipped: admin_users has no 'status' column`)
       }
     } catch (e2) {
       // admin_users 同步失败不阻塞
