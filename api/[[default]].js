@@ -134,7 +134,7 @@ function hashPassword(password) {
 
 // ====== 路由: 认证 ======
 
-// 登录
+// 登录（管理员和用户共用，根据数据库 role 字段区分）
 app.post('/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body
@@ -153,11 +153,16 @@ app.post('/auth/login', async (req, res) => {
       return res.status(401).json(error('用户名或密码错误'))
     }
 
+    // 使用数据库中的实际角色，不再硬编码为 admin
+    const userRole = user.role || 'user'
+
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: 'admin' },
+      { id: user.id, username: user.username, role: userRole },
       JWT_SECRET,
       { expiresIn: '24h' }
     )
+
+    const payload = { token, userInfo: { id: user.id, username: user.username, nickname: user.nickname || user.username, role: userRole } }
 
     // 同步到 users 表
     try {
@@ -658,6 +663,74 @@ app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) =
   } catch (e) {
     console.error('Adjust points error:', e.message)
     res.status(500).json(error('调整积分失败: ' + e.message))
+  }
+})
+
+// 重置用户密码
+app.put('/admin/users/:id/password', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { newPassword } = req.body
+    const targetId = req.params.id
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json(error('密码至少6位'))
+    }
+
+    // 查用户对应的 admin_users 记录
+    const userList = await supabaseGet('users', {
+      select: '*,admin_user_id',
+      filter: { 'id': `eq.${targetId}` },
+      single: true
+    })
+    const user = Array.isArray(userList) ? userList[0] : userList
+    if (!user) return res.status(404).json(error('用户不存在'))
+
+    const adminUserId = user.admin_user_id
+    if (!adminUserId) {
+      // 没有 admin_user_id，尝试直接用 username 去 admin_users 查
+      const adminList = await supabaseGet('admin_users', {
+        select: 'id',
+        filter: { 'username': `eq.${user.username}` },
+        limit: 1
+      })
+      const adminRec = Array.isArray(adminList) ? adminList[0] : adminList
+      if (!adminRec) return res.status(404).json(error('找不到对应的管理员账号'))
+      await supabaseUpdate('admin_users', adminRec.id, { password_hash: hashPassword(newPassword) })
+    } else {
+      await supabaseUpdate('admin_users', adminUserId, { password_hash: hashPassword(newPassword) })
+    }
+
+    res.json(success(null, '密码重置成功'))
+  } catch (e) {
+    console.error('Reset password error:', e.message)
+    res.status(500).json(error('重置密码失败: ' + e.message))
+  }
+})
+
+// 切换用户状态
+app.put('/admin/users/:id/status', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { status } = req.body
+    const targetId = req.params.id
+
+    // 同时更新 users 和 admin_users 的状态
+    const userList = await supabaseGet('users', {
+      select: '*,admin_user_id',
+      filter: { 'id': `eq.${targetId}` },
+      single: true
+    })
+    const user = Array.isArray(userList) ? userList[0] : userList
+    if (!user) return res.status(404).json(error('用户不存在'))
+
+    await supabaseUpdate('users', targetId, { status: Number(status) })
+
+    if (user.admin_user_id) {
+      try { await supabaseUpdate('admin_users', user.admin_user_id, { status: Number(status) === 1 ? 'active' : 'disabled' }) } catch {}
+    }
+
+    res.json(success(null, '状态更新成功'))
+  } catch (e) {
+    console.error('Toggle status error:', e.message)
+    res.status(500).json(error('状态更新失败'))
   }
 })
 

@@ -27,11 +27,13 @@
       <el-table :data="users" v-loading="loading" stripe>
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="username" label="用户名" width="150" />
-        <el-table-column prop="pointsBalance" label="剩余积分" width="100" />
+        <el-table-column label="剩余积分" width="100">
+          <template #default="{ row }">{{ row.points ?? row.points_balance ?? row.pointsBalance ?? '-' }}</template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="80">
           <template #default="{ row }">
-            <el-tag :type="row.status === 1 ? 'success' : 'danger'">
-              {{ row.status === 1 ? '启用' : '禁用' }}
+            <el-tag :type="row.status === 1 || row.status === 'active' ? 'success' : 'danger'">
+              {{ row.status === 1 || row.status === 'active' ? '启用' : '禁用' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -86,7 +88,7 @@
     <el-dialog v-model="showPointsDialog" title="调整积分" width="440px">
       <el-form label-width="80px">
         <el-form-item label="用户">
-          <span>{{ currentUser?.username }}（当前余额: {{ currentUser?.pointsBalance }}）</span>
+          <span>{{ currentUser?.username }}（当前余额: {{ currentUser?.points ?? currentUser?.points_balance ?? currentUser?.pointsBalance ?? 0 }}）</span>
         </el-form-item>
         <el-form-item label="调整额度">
           <el-input-number v-model="pointsForm.amount" :precision="2" placeholder="正数增加，负数减少" />
