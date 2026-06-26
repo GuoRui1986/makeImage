@@ -223,7 +223,7 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
     // 检查余额（直接查 users 表，不用 RPC）
     const userId = req.user.id
     const userRec = await supabaseGet('users', {
-      select: 'points,points_balance',
+      select: '*',
       filter: { 'id': `eq.${userId}` },
       single: true
     })
@@ -236,8 +236,9 @@ app.post('/tasks/create', authMiddleware, async (req, res) => {
 
     // 扣积分（直接 UPDATE，不用 RPC）
     const newBalance = currentBalance - totalCost
+    const balCol = userObj?.hasOwnProperty('points') ? 'points' : (userObj?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
     try {
-      await supabaseUpdate('users', userId, { points: newBalance })
+      await supabaseUpdate('users', userId, { [balCol]: newBalance })
       try {
         await supabasePost('points_records', {
           user_id: userId,
@@ -378,13 +379,14 @@ app.get('/tasks/status/:taskId', authMiddleware, async (req, res) => {
       // 退积分（直接 UPDATE，不用 RPC）
       try {
         const uRec = await supabaseGet('users', {
-          select: 'points,points_balance',
+          select: '*',
           filter: { 'id': `eq.${task.user_id}` },
           single: true
         })
         const u = Array.isArray(uRec) ? uRec[0] : uRec
         const bal = Number(u?.points ?? u?.points_balance ?? 0) + Number(task.points_cost || 0)
-        await supabaseUpdate('users', task.user_id, { points: bal })
+        const refCol = u?.hasOwnProperty('points') ? 'points' : (u?.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
+        await supabaseUpdate('users', task.user_id, { [refCol]: bal })
         try {
           await supabasePost('points_records', {
             user_id: task.user_id,
@@ -458,7 +460,7 @@ app.get('/tasks/pricing', async (req, res) => {
 app.get('/points/balance', authMiddleware, async (req, res) => {
   try {
     const userList = await supabaseGet('users', {
-      select: 'points,points_balance',
+      select: '*',
       filter: { 'id': `eq.${req.user.id}` },
       single: true
     })
@@ -625,20 +627,21 @@ app.put('/admin/users/:id/points', authMiddleware, adminOnly, async (req, res) =
 
     // 先查当前用户和余额
     const userList = await supabaseGet('users', {
-      select: '*,points,points_balance',
+      select: '*',
       filter: { 'id': `eq.${targetId}` },
       single: true
     })
     const user = Array.isArray(userList) ? userList[0] : userList
     if (!user) return res.status(404).json(error('用户不存在'))
 
-    // 兼容两种列名：points 或 points_balance
-    const currentBalance = Number(user.points ?? user.points_balance ?? 0)
+    // 兼容多种可能的列名
+    const currentBalance = Number(user.points ?? user.points_balance ?? user.points_balance ?? 0)
     const newBalance = currentBalance + adjustAmount
     if (newBalance < 0) return res.status(400).json(error('调整后余额不能为负数'))
 
-    // 直接更新余额（不用 RPC）
-    await supabaseUpdate('users', targetId, { points: newBalance })
+    // 更新余额：自动检测实际存在的列名
+    const balanceCol = user.hasOwnProperty('points') ? 'points' : (user.hasOwnProperty('points_balance') ? 'points_balance' : 'points')
+    await supabaseUpdate('users', targetId, { [balanceCol]: newBalance })
 
     // 写流水记录
     try {
